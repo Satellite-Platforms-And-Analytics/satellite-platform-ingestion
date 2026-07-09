@@ -1,0 +1,41 @@
+# Satellite Platform — Ingestion Pipeline
+# Python 3.11+
+# Install: pip install -r requirements.txt
+
+# ── HTTP / API ─────────────────────────────────────────────────────────────────
+requests>=2.34.0
+aiohttp>=3.9.0
+
+# ── Orbit propagation ─────────────────────────────────────────────────────────
+sgp4>=2.22
+skyfield>=1.48
+
+# ── Geospatial / imagery ──────────────────────────────────────────────────────
+rasterio>=1.4.0
+geopandas>=1.0.0
+shapely>=2.0.0
+pyproj>=3.6.0
+fiona>=1.9.0
+
+# ── Data processing ───────────────────────────────────────────────────────────
+numpy>=2.0.0
+pandas>=2.0.0
+dask>=2024.0.0
+xarray>=2024.0.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+psycopg2-binary>=2.9.0
+sqlalchemy>=2.0.0
+alembic>=1.13.0
+
+# ── Scheduling ────────────────────────────────────────────────────────────────
+apscheduler>=3.10.0
+
+# ── Environment ───────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+
+# ── Dev / testing ─────────────────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+ruff>=0.4.0
+mypy>=1.10.0
