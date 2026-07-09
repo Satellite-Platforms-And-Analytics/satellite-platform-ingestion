@@ -1,0 +1,18 @@
+skyfield
+sgp4
+pandas
+numpy
+requests
+tqdm
+openpyxl
+python-dotenv
+psutil
+tzdata
+
+# Optional: streaming/async Space-Track client
+# Enables iter_lines=True streaming (reduces peak memory 100-200x for large
+# gp_history responses) and async parallel batch fetching.
+# Install with: pip install spacetrack
+# For async support: pip install spacetrack[async]
+# Disable: set USE_SPACETRACK_LIB=false in .env
+# spacetrack
