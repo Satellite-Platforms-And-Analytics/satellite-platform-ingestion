@@ -1,0 +1,87 @@
+# .github/workflows/ingest_tle.yml
+#
+# Runs src/tle/fetcher.py on a schedule to keep the satellites and
+# tle_history tables current in Supabase.
+#
+# SCHEDULE: every 2 hours, matching CELESTRAK_CACHE_MAX_AGE_HOURS in
+# src/tracking/config.py -- CelesTrak itself only refreshes GP data every
+# 2 hours, so running more often just gets throttle notices back (which
+# fetcher.py / gp_json.py already handle gracefully, but there's no
+# upside to tripping them on a schedule).
+#
+# DEPENDENCIES: intentionally NOT `pip install -r requirements.txt`
+# (the root one). That file includes the full geospatial/imagery stack
+# (rasterio, geopandas, fiona, pyproj) for src/imagery/ingest.py, which
+# needs system GDAL libraries and is slow to install -- unnecessary
+# weight for a job that only runs fetcher.py. Installing the specific
+# packages fetcher.py + writer.py actually import keeps this job fast
+# and avoids an unrelated native-dependency failure mode breaking TLE
+# ingestion. If fetcher.py's imports change, update the list below.
+#
+# REQUIRED SECRET:
+#   DATABASE_URL  -- Supabase Postgres connection string. Use the
+#                     POOLED connection string (port 6543), not the
+#                     direct one (port 5432) -- this job is a short-lived
+#                     process and the pooled endpoint is what Supabase
+#                     recommends for that usage pattern.
+#
+# Set it at: repo Settings -> Secrets and variables -> Actions -> New
+# repository secret -> DATABASE_URL
+
+name: Ingest TLE Data
+
+on:
+  schedule:
+    # Every 2 hours, on the hour. GitHub Actions cron is UTC.
+    - cron: "0 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      group:
+        description: >
+          Optional: fetch a single CelesTrak group only (e.g. "starlink").
+          Leave blank to fetch all groups (same as the scheduled run).
+        required: false
+        default: ""
+      dry_run:
+        description: "Fetch and parse only -- skip the database write"
+        required: false
+        default: false
+        type: boolean
+
+# Prevent two runs from writing to the database at the same time if a
+# manual trigger overlaps with the scheduled run.
+concurrency:
+  group: ingest-tle
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install fetcher.py + writer.py dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests sgp4>=2.22 sqlalchemy>=2.0.0 psycopg2-binary>=2.9.0
+
+      - name: Run fetcher.py (dry run)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+        run: |
+          python src/tle/fetcher.py --dry-run ${{ inputs.group != '' && format('--group {0}', inputs.group) || '' }}
+
+      - name: Run fetcher.py (write to database)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python src/tle/fetcher.py ${{ github.event_name == 'workflow_dispatch' && inputs.group != '' && format('--group {0}', inputs.group) || '' }}
