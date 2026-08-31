@@ -39,12 +39,15 @@ from rasterio.enums import Resampling
 #  CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-BASE_DIR        = Path("D:/SatelliteData")
+# Paths are environment-overridable so the tree can move without code edits.
+BASE_DIR        = Path(os.environ.get("SATELLITE_DATA_DIR", r"D:\SatelliteData"))
 STAGING_DIR     = BASE_DIR / "staging"
 RAW_DIR         = BASE_DIR / "raw" / "sentinel-2"
 PROCESSED_DIR   = BASE_DIR / "processed"
-DB_PATH         = Path("D:/Databases/satellite_platform.db")
-CSV_LOG_PATH    = Path("D:/Databases/ingestion_log.csv")
+
+DB_DIR          = Path(os.environ.get("SATELLITE_DB_DIR", r"D:\Databases\satellite"))
+DB_PATH         = DB_DIR / "satellite_platform.db"
+CSV_LOG_PATH    = DB_DIR / "ingestion_log.csv"
 
 # GeoTIFF conversion settings
 COMPRESS        = "lzw"
