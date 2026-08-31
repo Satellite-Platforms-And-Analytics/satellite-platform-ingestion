@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import os
 import sys
+import logging
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
+
+log = logging.getLogger(__name__)
 
 # ── Locate WIT ────────────────────────────────────────────────────────────────
 # Reads WIT_PATH from environment; falls back to D:\Projects\WIT
@@ -146,6 +149,8 @@ class SatelliteResources:
         WebIntelligence = _import_wit()
         self._wi = WebIntelligence()
         self._cache: Dict[str, List[Dict]] = {}
+        self._taxonomy: Optional[set] = None
+        self._validated = False
 
     def close(self):
         self._wi.close()
@@ -327,6 +332,90 @@ class SatelliteResources:
         "News & Media",
     ])
 
+    # ── Taxonomy validation ──────────────────────────────────────────────────
+    #
+    # _RESOURCE_MAP names domains and subdomains that must exist in the WIT
+    # database. When a name is wrong the query simply returns nothing and the
+    # broader fallback strategies quietly fill the gap with noise -- the
+    # failure is invisible. On 2026-08-30, 17 of 18 configured subdomains
+    # were stale and nobody noticed for weeks. These checks make that loud.
+
+    def _load_taxonomy(self) -> set:
+        """Cache the set of (km_domain, km_subdomain) pairs actually present."""
+        if self._taxonomy is None:
+            try:
+                rows = self._wi._db._conn.execute(
+                    "SELECT DISTINCT km_domain, km_subdomain FROM classifications"
+                ).fetchall()
+                self._taxonomy = {(r[0], r[1]) for r in rows}
+            except Exception as exc:
+                log.warning("Could not read WIT taxonomy: %s", exc)
+                self._taxonomy = set()
+        return self._taxonomy
+
+    def validate_taxonomy(self, strict: bool = False) -> Dict[str, List[str]]:
+        """
+        Check every domain and subdomain in _RESOURCE_MAP against the database.
+
+        Returns {category: [problem, ...]} for categories with problems;
+        an empty dict means everything resolves.
+
+        strict=True raises ValueError instead of returning. Off by default so
+        a taxonomy drift degrades results rather than killing the scheduled
+        ingestion job -- use strict in tests and the --validate CLI.
+        """
+        taxonomy   = self._load_taxonomy()
+        known_doms = {d for d, _ in taxonomy}
+        known_subs = {s for _, s in taxonomy}
+        problems: Dict[str, List[str]] = {}
+
+        for category, cfg in _RESOURCE_MAP.items():
+            issues = []
+            for domain in cfg.get("domains", []):
+                if domain not in known_doms:
+                    issues.append(f"domain not in taxonomy: {domain!r}")
+                elif not any(d == domain for d, _ in taxonomy):
+                    issues.append(f"domain has no classified sites: {domain!r}")
+
+            allowed = set(cfg.get("domains", [])) | {"Space & Aerospace"}
+            for sub in cfg.get("subdomains", []):
+                if sub not in known_subs:
+                    issues.append(f"subdomain not in taxonomy: {sub!r}")
+                elif not any(s == sub and d in allowed for d, s in taxonomy):
+                    where = sorted({d for d, s in taxonomy if s == sub})
+                    issues.append(
+                        f"subdomain {sub!r} exists but not under {sorted(allowed)} "
+                        f"(found under {where})"
+                    )
+            if issues:
+                problems[category] = issues
+
+        if problems and strict:
+            lines = [f"  {c}: {i}" for c, iss in problems.items() for i in iss]
+            raise ValueError(
+                "WIT taxonomy validation failed -- _RESOURCE_MAP references "
+                "names that do not exist:\n" + "\n".join(lines)
+            )
+        return problems
+
+    def _warn_once_if_stale(self) -> None:
+        """Emit one warning per instance if the resource map has drifted."""
+        if self._validated:
+            return
+        self._validated = True
+        try:
+            problems = self.validate_taxonomy(strict=False)
+        except Exception:
+            return
+        if problems:
+            n = sum(len(v) for v in problems.values())
+            log.warning(
+                "WIT resource map has %d taxonomy problem(s) across %d "
+                "categor(ies); results will be less precise. Run "
+                "`python src/resources.py --validate` for detail.",
+                n, len(problems),
+            )
+
     @staticmethod
     def _is_acronym(term: str) -> bool:
         """
@@ -354,6 +443,8 @@ class SatelliteResources:
         """
         if category in self._cache:
             return self._cache[category]
+
+        self._warn_once_if_stale()
 
         cfg     = _RESOURCE_MAP.get(category, {})
         results = {}
@@ -461,6 +552,10 @@ def space_agencies()     -> List[Dict]:
 def find(query: str, limit: int = 20) -> List[Dict]:
     with SatelliteResources() as r: return r.find(query, limit)
 
+def validate_taxonomy(strict: bool = False) -> Dict[str, List[str]]:
+    """Check _RESOURCE_MAP against the live WIT taxonomy. See the method."""
+    with SatelliteResources() as r: return r.validate_taxonomy(strict=strict)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CLI — run directly to sync and report
@@ -473,9 +568,27 @@ if __name__ == "__main__":
     parser.add_argument("--summary", action="store_true", help="Show resource summary")
     parser.add_argument("--find",    type=str,            help="Search for resources")
     parser.add_argument("--tle",     action="store_true", help="List TLE sources")
+    parser.add_argument("--validate", action="store_true",
+                        help="Check _RESOURCE_MAP against the live WIT taxonomy "
+                             "and exit non-zero if anything is stale")
     args = parser.parse_args()
 
     with SatelliteResources() as res:
+        if args.validate:
+            problems = res.validate_taxonomy(strict=False)
+            if not problems:
+                n = sum(len(c.get("subdomains", [])) + len(c.get("domains", []))
+                        for c in _RESOURCE_MAP.values())
+                print(f"  Taxonomy OK - all {n} configured names resolve.")
+                sys.exit(0)
+            print("  Taxonomy problems found:\n")
+            for cat, issues in problems.items():
+                print(f"  {cat}")
+                for i in issues:
+                    print(f"      - {i}")
+            print("\n  Fix _RESOURCE_MAP, or reclassify in WIT, then re-run.")
+            sys.exit(1)
+
         if args.sync:
             print("Syncing WIT satellite project...")
             res.sync(verbose=True)
