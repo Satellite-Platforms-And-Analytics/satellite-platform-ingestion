@@ -53,71 +53,74 @@ def _import_wit():
 # Maps pipeline concern → WIT search terms / tags / domains
 _RESOURCE_MAP = {
     "tle_sources": {
-        "subdomains": ["Orbital Mechanics", "Satellite Data & TLE", "Satellite Data",
-                       "Space Situational Awareness"],
+        "subdomains": ["Orbital Mechanics", "Satellite Tracking",
+                       "Space Object Tracking"],
         "search":     ["TLE two-line element orbital elements NORAD",
                        "celestrak space-track satellite tracking"],
-        "terms":      ["TLE", "two-line", "orbital element", "NORAD", "celestrak",
-                       "space-track", "ephemeris"],
+        "terms":      ["TLE", "NORAD", "celestrak", "space-track",
+                       "two-line element", "orbital element", "ephemeris"],
     },
     "tracking_databases": {
-        "subdomains": ["Space Situational Awareness", "Satellite Data & TLE",
-                       "Satellite Data"],
+        # "Database" also holds industry directories and job boards - too broad.
+        "subdomains": ["Satellite Tracking", "Space Object Tracking"],
         "search":     ["satellite tracking SSA conjunction analysis space fence"],
-        "terms":      ["tracking", "SSA", "surveillance", "conjunction",
-                       "catalog", "debris", "space fence"],
+        "terms":      ["SSA", "conjunction", "space fence", "satellite catalog",
+                       "orbital debris", "space surveillance"],
     },
     "imagery_sources": {
-        "subdomains": ["Remote Sensing", "Satellite Imagery"],
+        "subdomains": [],
         "search":     ["satellite imagery remote sensing earth observation API"],
-        "terms":      ["imagery", "remote sensing", "earth observation",
-                       "SAR", "optical", "multispectral", "hyperspectral"],
+        "terms":      ["SAR", "remote sensing", "earth observation",
+                       "satellite imagery", "multispectral", "hyperspectral"],
     },
     "launch_providers": {
-        "subdomains": ["Launch Providers", "Propulsion Systems"],
+        "subdomains": ["Launch Schedules", "Private Spaceflight"],
         "search":     ["rocket launch provider smallsat rideshare manifests"],
-        "terms":      ["launch", "rocket", "rideshare", "launch vehicle",
-                       "manifest", "launch schedule", "payload"],
+        # "rocket" alone matched every NASA centre whose blurb mentions
+        # rockets - use named providers and multi-word phrases instead.
+        "terms":      ["launch vehicle", "rideshare", "launch schedule",
+                       "launch provider", "rocket lab", "spacex", "arianespace",
+                       "blue origin", "united launch alliance"],
     },
     "industry_news": {
-        "subdomains": ["Space & Aerospace News", "Industry Publications"],
+        "subdomains": ["News", "Space News"],
         "search":     ["satellite aerospace news space industry publication"],
-        "terms":      ["news", "spacenews", "aviationweek", "parabolicarc",
+        "terms":      ["spacenews", "aviationweek", "parabolicarc",
                        "spaceflight", "nasaspaceflight"],
         "domains":    ["News & Media"],
     },
     "regulatory_sources": {
-        "subdomains": ["FAA & Regulatory", "Standards & Certification"],
+        "subdomains": ["Standards", "Space Policy", "Space Agency"],
         "search":     ["satellite regulatory FCC ITU frequency coordination ITAR"],
-        "terms":      ["regulatory", "FCC", "ITU", "ITAR", "EAR", "licensing",
-                       "spectrum", "frequency", "compliance"],
-        "domains":    ["Government & Policy", "Defense & Intelligence"],
+        "terms":      ["FCC", "ITU", "ITAR", "EAR", "spectrum allocation",
+                       "frequency coordination", "export control", "licensing"],
+        "domains":    ["Government & Policy"],
     },
     "operators": {
-        "subdomains": ["Satellite Communication", "SmallSat & CubeSat",
-                       "Launch Providers"],
+        "subdomains": ["Private Spaceflight"],
         "search":     ["satellite operator constellation GEO LEO MEO commercial"],
-        "terms":      ["operator", "constellation", "telesat", "intelsat",
-                       "ses ", "viasat", "iridium", "starlink", "oneweb"],
+        "terms":      ["constellation", "telesat", "intelsat", "viasat",
+                       "iridium", "starlink", "oneweb", "satellite operator"],
     },
     "funding_sources": {
-        "subdomains": ["SBIR & Contracts", "Government Programs"],
+        "subdomains": ["Science Funding", "Government Funding",
+                       "Government Subsidies"],
         "search":     ["SBIR STTR DoD space funding grants contracts awards"],
-        "terms":      ["SBIR", "STTR", "grant", "contract", "award",
-                       "OTA", "SAM.gov", "USASpending", "DARPA"],
-        "domains":    ["Defense & Intelligence", "Government & Policy"],
+        "terms":      ["SBIR", "STTR", "DARPA", "OTA", "SAM.gov", "USASpending",
+                       "grant program", "contract award"],
+        "domains":    ["Government & Policy"],
     },
     "standards": {
-        "subdomains": ["Standards & Certification", "Aerospace Standards"],
+        "subdomains": ["Standards"],
         "search":     ["CCSDS space data standard ECSS AIAA MIL-SPEC"],
-        "terms":      ["CCSDS", "ECSS", "AIAA", "standard", "MIL-SPEC",
-                       "interface control", "ICD"],
+        "terms":      ["CCSDS", "ECSS", "AIAA", "MIL-SPEC", "ICD",
+                       "interface control"],
     },
     "trl_mrl": {
-        "subdomains": ["TRL & MRL Assessment"],
+        "subdomains": [],
         "search":     ["technology readiness TRL manufacturing readiness MRL assessment"],
         "terms":      ["TRL", "MRL", "technology readiness", "manufacturing readiness"],
-        "domains":    ["Defense & Intelligence", "Science & Engineering"],
+        "domains":    ["Science & Engineering"],
     },
 }
 
@@ -324,11 +327,30 @@ class SatelliteResources:
         "News & Media",
     ])
 
+    @staticmethod
+    def _is_acronym(term: str) -> bool:
+        """
+        True for short all-caps tokens (EAR, ITU, TRL, SBIR).
+
+        These must match case-sensitively: SQLite's LIKE is case-insensitive
+        for ASCII, so '%EAR%' matches "Earth" and "research", and '%ITAR%'
+        matches "military". GLOB is case-sensitive and avoids that entirely.
+        """
+        core = term.replace("-", "").replace(".", "")
+        return len(core) <= 6 and core.isupper() and core.isalpha()
+
     def _query(self, category: str) -> List[Dict]:
         """
         Multi-strategy query returning sites relevant to a pipeline category.
-        All results are domain-filtered so cooking sites and other noise
-        cannot appear regardless of term matches.
+
+        Precision rules:
+          * Acronyms match case-sensitively via GLOB (see _is_acronym).
+          * Word terms match on space-padded boundaries only -- no bare
+            substring fallback, which previously defeated the padding.
+          * Results are ordered before LIMIT so the same call returns the
+            same rows on every machine and SQLite build.
+          * Domains are used to *filter*, never to bulk-add every site they
+            contain.
         """
         if category in self._cache:
             return self._cache[category]
@@ -336,63 +358,83 @@ class SatelliteResources:
         cfg     = _RESOURCE_MAP.get(category, {})
         results = {}
 
-        # Determine which domains are acceptable for this category
-        allowed_domains = set(cfg.get("domains", [])) | {"Space & Aerospace"}
+        allowed_domains = sorted(set(cfg.get("domains", [])) | {"Space & Aerospace"})
+        domain_placeholders = ",".join("?" * len(allowed_domains))
 
         # Strategy 1: subdomain filter (most precise)
         for subdomain in cfg.get("subdomains", []):
-            for site in self._wi.get_sites(
-                km_domain="Space & Aerospace",
-                km_subdomain=subdomain, limit=500
-            ):
-                results[site["url"]] = site
-
-        # Strategy 2: term matching WITHIN allowed domains only
-        domain_placeholders = ",".join("?" * len(allowed_domains))
-        for term in cfg.get("terms", []):
-            # Use space-padded LIKE to avoid partial word hits ("TLE" in "Attlee")
-            padded = f"% {term} %"
-            bare   = f"%{term}%"
             try:
                 rows = self._wi._db._conn.execute(f"""
                     SELECT s.*, c.km_domain, c.km_subdomain, c.tags
                     FROM sites s
-                    LEFT JOIN classifications c ON c.site_id = s.id
-                    WHERE c.km_domain IN ({domain_placeholders})
-                      AND (
-                          s.description LIKE ? OR s.description LIKE ?
-                          OR s.name      LIKE ? OR s.name      LIKE ?
-                      )
+                    JOIN classifications c ON c.site_id = s.id
+                    WHERE c.km_subdomain = ?
+                      AND c.km_domain IN ({domain_placeholders})
                       AND s.is_private = 0
-                    LIMIT 30
-                """, list(allowed_domains) + [padded, bare, padded, bare]
-                ).fetchall()
+                    ORDER BY s.url
+                """, [subdomain] + allowed_domains).fetchall()
                 for r in rows:
-                    d = dict(r)
-                    if d["url"] not in results:
-                        results[d["url"]] = d
+                    results.setdefault(dict(r)["url"], dict(r))
             except Exception:
                 pass
 
-        # Strategy 3: explicit domain filter (news, regulatory, etc.)
-        for domain in cfg.get("domains", []):
-            for site in self._wi.get_sites(km_domain=domain, limit=500):
-                results[site["url"]] = site
+        # Strategy 2: term matching within allowed domains
+        for term in cfg.get("terms", []):
+            term = term.strip()
+            if not term:
+                continue
+            if self._is_acronym(term):
+                pats = [f"* {term} *", f"* {term}", f"{term} *", term]
+                cond = " OR ".join(["s.description GLOB ?"] * len(pats)
+                                   + ["s.name GLOB ?"] * len(pats))
+                params = allowed_domains + pats + pats
+            else:
+                cond = ("(' ' || LOWER(s.description) || ' ') LIKE ? "
+                        "OR (' ' || LOWER(s.name) || ' ') LIKE ?")
+                pad = f"% {term.lower()} %"
+                params = allowed_domains + [pad, pad]
+            try:
+                rows = self._wi._db._conn.execute(f"""
+                    SELECT s.*, c.km_domain, c.km_subdomain, c.tags
+                    FROM sites s
+                    JOIN classifications c ON c.site_id = s.id
+                    WHERE c.km_domain IN ({domain_placeholders})
+                      AND ({cond})
+                      AND s.is_private = 0
+                    ORDER BY s.url
+                    LIMIT 30
+                """, params).fetchall()
+                for r in rows:
+                    results.setdefault(dict(r)["url"], dict(r))
+            except Exception:
+                pass
 
-        # Strategy 4: FTS search — only keep results in allowed domains
+        # Strategy 3: FTS search, restricted to allowed domains
         for query in cfg.get("search", []):
-            for site in self._wi.search(query, limit=30):
-                if site["url"] not in results:
-                    domain = site.get("km_domain", "")
-                    if domain in allowed_domains or not domain:
-                        results[site["url"]] = site
+            try:
+                for site in self._wi.search(query, limit=30):
+                    if site.get("km_domain", "") in allowed_domains:
+                        results.setdefault(site["url"], site)
+            except Exception:
+                pass
 
-        # Final filter: remove any site not in an allowed/space domain
-        out = [
-            s for s in results.values()
-            if s.get("km_domain", "") in self._SPACE_DOMAINS
-               or s.get("km_domain", "") == ""
-        ]
+        # Final filter: must be classified into an allowed domain.
+        # Unclassified sites (km_domain == "") are no longer admitted - they
+        # were a large share of the previous false-positive volume.
+        out = [s for s in results.values()
+               if s.get("km_domain", "") in allowed_domains]
+        out.sort(key=lambda s: (s.get("name") or "").lower())
+
+        # Collapse duplicate organisations: the same body often appears under
+        # several URLs (www/non-www, /about, regional chapters). Keep the
+        # shortest URL, which is almost always the canonical entry point.
+        by_name = {}
+        for s in out:
+            key = " ".join((s.get("name") or s.get("url", "")).lower().split())
+            prev = by_name.get(key)
+            if prev is None or len(s.get("url", "")) < len(prev.get("url", "")):
+                by_name[key] = s
+        out = sorted(by_name.values(), key=lambda s: (s.get("name") or "").lower())
         self._cache[category] = out
         return out
 
