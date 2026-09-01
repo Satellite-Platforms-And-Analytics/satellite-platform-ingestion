@@ -1,0 +1,93 @@
+# .github/workflows/propagate.yml
+#
+# Propagates stored TLEs to sub-satellite points and writes them to
+# orbital_positions, then prunes anything older than 48h.
+#
+# SCHEDULE: hourly, at :17 past.
+#
+#   Why hourly and not every 5 minutes, as the original roadmap said:
+#
+#   1. Budget. ~8,000 tracked objects at 5-minute resolution is 2.3M rows
+#      per day; the 48h retention window would hold 4.6M rows and roughly
+#      498 MB - the entire Supabase free tier, before TLE history or
+#      imagery metadata. It would also need ~12,960 Actions minutes a
+#      month against a 2,000 minute allowance.
+#   2. It would not actually run that often anyway. Scheduled workflows on
+#      shared runners are best-effort: the 2-hourly ingest_tle.yml was
+#      observed landing 8-12h apart on 2026-08-31. Asking for every 5
+#      minutes buys skipped runs, not resolution.
+#
+#   The live globe does not read this table. It fetches TLEs and propagates
+#   client-side with satellite.js, which gives smooth motion at zero
+#   per-frame server cost. This job exists for history and analytics:
+#   trend queries, coverage statistics, and anything that needs to know
+#   where an object was rather than where it is.
+#
+#   Why :17 and not :00 - GitHub's own guidance: scheduled jobs at the top
+#   of the hour compete with everyone else's and are likelier to be
+#   delayed or dropped. An offbeat minute measurably improves delivery.
+#
+# DEPENDENCIES: deliberately not `pip install -r requirements.txt`. That
+# file carries the full geospatial stack (rasterio, geopandas, fiona,
+# pyproj) for src/imagery/, which needs system GDAL and is slow. The
+# propagator uses sgp4 and stdlib maths only.
+#
+# REQUIRED SECRET:
+#   DATABASE_URL -- Supabase Postgres, POOLED connection string (port 6543).
+
+name: Propagate Orbital Positions
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Only propagate this many satellites (blank = all)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Propagate and report, but do not write"
+        required: false
+        default: false
+        type: boolean
+      skip_prune:
+        description: "Do not delete positions older than 48h"
+        required: false
+        default: false
+        type: boolean
+
+# One writer at a time. A manual run overlapping the schedule would other-
+# wise have two processes upserting the same (norad_id, timestamp) keys.
+concurrency:
+  group: propagate-positions
+  cancel-in-progress: false
+
+jobs:
+  propagate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install propagator dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "sgp4>=2.22" "sqlalchemy>=2.0.0" "psycopg2-binary>=2.9.0"
+
+      - name: Propagate and write
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python -m src.propagation --once \
+            ${{ inputs.limit != '' && format('--limit {0}', inputs.limit) || '' }} \
+            ${{ inputs.dry_run == true && '--dry-run' || '' }} \
+            ${{ !(inputs.dry_run == true) && !(inputs.skip_prune == true) && '--prune' || '' }}
