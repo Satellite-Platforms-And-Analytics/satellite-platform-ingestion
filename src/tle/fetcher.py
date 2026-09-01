@@ -420,6 +420,14 @@ def write_records_to_db(records: list, run_id: str) -> int:
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
+    # writer.get_engine() reads DATABASE_URL from os.environ, which is right
+    # for GitHub Actions. Load .env so manual runs work too.
+    try:
+        from src.env import load_env
+        load_env()
+    except ImportError:
+        pass
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(message)s",

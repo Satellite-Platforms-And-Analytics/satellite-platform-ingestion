@@ -26,6 +26,13 @@ from typing import List, Dict, Optional, Any, Tuple
 
 log = logging.getLogger(__name__)
 
+# .env must be loaded before _WIT_PATH below is evaluated at import time.
+try:
+    from src.env import load_env
+    load_env()
+except ImportError:
+    pass
+
 # ── Locate WIT ────────────────────────────────────────────────────────────────
 # Reads WIT_PATH from environment; falls back to D:\Projects\WIT
 _WIT_PATH = Path(os.environ.get("WIT_PATH",

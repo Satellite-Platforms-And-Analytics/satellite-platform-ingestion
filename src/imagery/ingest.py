@@ -40,6 +40,12 @@ from rasterio.enums import Resampling
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Paths are environment-overridable so the tree can move without code edits.
+try:
+    from src.env import load_env
+    load_env()
+except ImportError:
+    pass
+
 BASE_DIR        = Path(os.environ.get("SATELLITE_DATA_DIR", r"D:\SatelliteData"))
 STAGING_DIR     = BASE_DIR / "staging"
 RAW_DIR         = BASE_DIR / "raw" / "sentinel-2"
