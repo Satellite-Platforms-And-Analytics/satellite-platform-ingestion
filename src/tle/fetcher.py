@@ -65,6 +65,7 @@ import logging
 import argparse
 import json as _json
 import time as _time
+from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional
@@ -111,45 +112,33 @@ except ImportError:
 # CelesTrak's published group list (celestrak.org/NORAD/elements/).
 _GP_BASE_URL = "https://celestrak.org/NORAD/elements/gp.php"
 
-# Verified against CelesTrak 2026-09-01 with --check-groups; counts from
-# that probe. CelesTrak answers an unknown group with HTTP 200 and a
-# plain-text "Invalid query" body, so a name that stops existing will not
-# raise - run --check-groups after editing this list.
+# Verified against CelesTrak 2026-09-01 with --check-groups.
 #
-# Deliberately NOT exhaustive. Most CelesTrak groups (sarsat, planet,
-# spire, intelsat, ses, cubesat, military, ...) are subsets of 'active'
-# and dedupe away by norad_id, and the group an object arrived under is
-# not persisted - so fetching them costs requests and throttle exposure
-# for nothing. --probe-groups lists 28 valid names if that changes and
-# per-group provenance becomes worth storing.
+# DELIBERATELY MINIMAL - this is a courtesy-to-the-source decision, not an
+# oversight. CelesTrak asks users not to re-request data they already have
+# (celestrak.org/webmaster.php), and enforces it: an over-frequent request
+# returns "GP data has not updated since your last successful..." and
+# persistent abuse gets the client blocked.
+#
+# Measured on the 2026-09-01 run: 'active' returned 16,463 objects, and the
+# twelve other configured groups downloaded a further 12,825 objects to
+# contribute exactly 131 the catalogue did not already have. Twelve extra
+# requests and ~13k objects of someone else's bandwidth for 131 rows.
+#
+# So: fetch 'active' for everything on orbit, then only the groups holding
+# objects 'active' genuinely excludes. 5 requests per run instead of 17 -
+# 60/day rather than 204 - while returning MORE unique objects than before.
+#
+# Adding a group here should be justified by objects it uniquely contains.
+# --probe-groups lists 28 valid names; almost all are subsets of 'active'.
 CELESTRAK_GROUPS = [
-    "active",          # ~16,463  everything active and on orbit
-    "stations",        # 22
-    "visual",          # 157
-    "weather",         # 74   NOAA weather satellites live here; the
-                       #      configured 'noaa' group never existed
-    "goes",            # 6
-    "resource",        # 167
-    "starlink",        # ~11,034
-    "oneweb",          # 651
-    "gps-ops",         # 32
-    "glo-ops",         # 29
-    "galileo",         # 31
-    "beidou",          # 54
-    "geo",             # 568
-
-    # Objects 'active' does not contain.
-    "analyst",         # 568  uncorrelated / analyst objects
-
-    # Debris. CelesTrak catalogues debris by originating event, never as a
-    # single bucket - the configured 'debris' group never existed, so this
-    # platform has been running with no debris whatsoever despite
-    # satellites.object_type defining DEBRIS and Phase 1 naming
-    # conjunction and SSA work. Replaced 2026-09-01.
-    "cosmos-2251-debris",   # 584
-    "iridium-33-debris",    # 111
-    "cosmos-1408-debris",   # 3
+    "active",               # ~16,463  everything active and on orbit
+    "analyst",              #     568  uncorrelated / analyst objects
+    "cosmos-2251-debris",   #     584
+    "iridium-33-debris",    #     111
+    "cosmos-1408-debris",   #       3
 ]
+
 
 
 # Same throttle notice CelesTrak returns if a group is requested again
@@ -160,6 +149,13 @@ _CELESTRAK_THROTTLE_MARKER = "has not updated since your last successful"
 REQUEST_TIMEOUT = 30   # seconds
 RETRY_ATTEMPTS  = 3
 RETRY_DELAY     = 5    # seconds between retries
+REQUEST_SPACING = 3    # seconds between groups -- courtesy to CelesTrak
+
+#: CelesTrak regenerates GP data roughly every 2 hours; requesting a group
+#: again inside that window returns a throttle notice rather than data.
+#: This guard stops repeated LOCAL runs from hammering them - which is how
+#: 65 requests went out in 10 minutes on 2026-09-01 while debugging.
+MIN_REFETCH_SECONDS = 2 * 60 * 60
 
 
 def _group_url(group: str, fmt: str = "json") -> str:
@@ -314,6 +310,59 @@ def fetch_url(url: str, session: requests.Session) -> Optional[str]:
     return None
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Fetch log -- courtesy guard against re-requesting inside CelesTrak's window
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# src/tracking/ already does this properly for Space-Track (api_request_log.py,
+# tle_history_cache.py, spacetrack_policy_check.py) because that account has
+# been suspended before. The CelesTrak path had no equivalent: nothing stopped
+# repeated manual runs from re-requesting the same groups minutes apart, which
+# is exactly what happened on 2026-09-01 (80 requests, 65 within ten minutes).
+#
+# This records when each group was last fetched successfully and skips it if
+# CelesTrak cannot have new data yet. --force overrides, for the rare case
+# where a run genuinely needs to retry.
+
+def _fetch_log_path() -> Path:
+    base = os.environ.get("SATELLITE_DB_DIR", r"D:\Databases\satellite")
+    return Path(base) / "celestrak_fetch_log.json"
+
+
+def _load_fetch_log() -> dict:
+    try:
+        with open(_fetch_log_path(), "r", encoding="utf-8") as fh:
+            return _json.load(fh)
+    except Exception:
+        return {}
+
+
+def _record_fetch(group: str) -> None:
+    path = _fetch_log_path()
+    log_data = _load_fetch_log()
+    log_data[group] = datetime.now(timezone.utc).isoformat()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump(log_data, fh, indent=2, sort_keys=True)
+    except Exception as exc:
+        log.debug("Could not write fetch log: %s", exc)
+
+
+def _seconds_since_fetch(group: str, log_data: dict):
+    """Seconds since this group was last fetched, or None if never."""
+    stamp = log_data.get(group)
+    if not stamp:
+        return None
+    try:
+        when = datetime.fromisoformat(stamp)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - when).total_seconds()
+    except Exception:
+        return None
+
+
 def fetch_group(group: str, session: requests.Session,
                 status_out: Optional[dict] = None) -> list:
     """
@@ -421,12 +470,13 @@ def check_groups(candidates: Optional[list] = None) -> dict:
                     results[group] = (False, f"not JSON: {body[:50]}")
         except Exception as exc:
             results[group] = (False, f"{type(exc).__name__}: {exc}")
-        time.sleep(1.2)
+        time.sleep(REQUEST_SPACING)
     return results
 
 
 def fetch_all(groups: Optional[list] = None,
-              failures: Optional[list] = None) -> list:
+              failures: Optional[list] = None,
+              force: bool = False) -> list:
     """
     Fetch GP data from CelesTrak for specified groups (or all if None).
     Returns a deduplicated (by norad_id) list of TLERecord objects.
@@ -451,10 +501,22 @@ def fetch_all(groups: Optional[list] = None,
     print(f"  Groups: {', '.join(target_groups)}")
     print(f"{'=' * 55}\n")
 
+    fetch_log = _load_fetch_log()
+
     for group in target_groups:
         if group not in CELESTRAK_GROUPS:
             log.warning(f"Unknown group: {group} -- skipping")
             continue
+
+        # Do not ask CelesTrak for something it cannot have regenerated yet.
+        if not force:
+            age = _seconds_since_fetch(group, fetch_log)
+            if age is not None and age < MIN_REFETCH_SECONDS:
+                mins = (MIN_REFETCH_SECONDS - age) / 60
+                log.info(f"  {group}: fetched {age/60:.0f} min ago -- "
+                         f"skipping for another {mins:.0f} min "
+                         f"(--force to override)")
+                continue
 
         status: dict = {}
         records = fetch_group(group, session, status_out=status)
@@ -468,10 +530,14 @@ def fetch_all(groups: Optional[list] = None,
                 seen_norad.add(r.norad_id)
                 new_records.append(r)
 
+        if records:
+            _record_fetch(group)
         all_records.extend(new_records)
 
-        # Rate limiting -- be polite to CelesTrak.
-        time.sleep(1)
+        # Be polite to CelesTrak. With the list trimmed to 5 groups the
+        # extra delay costs a few seconds per run and materially lowers
+        # the chance of tripping their abuse protection.
+        time.sleep(REQUEST_SPACING)
 
     print(f"\n{'=' * 55}")
     if failures:
@@ -585,7 +651,12 @@ def main():
     )
     parser.add_argument(
         "--probe-groups", action="store_true",
-        help="Probe a wider candidate list to find valid replacements"
+        help="Probe ~35 candidate group names. Sends one request each -- "
+             "a diagnostic to run rarely, not routinely. Requires --force."
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Bypass the 2-hour re-fetch guard, and permit --probe-groups"
     )
     args = parser.parse_args()
 
@@ -602,6 +673,15 @@ def main():
                 "run with --dry-run to fetch without writing."
             )
             sys.exit(1)
+
+    if args.probe_groups and not args.force:
+        print("\n  --probe-groups sends ~35 requests to CelesTrak in under a")
+        print("  minute. CelesTrak asks clients not to re-request data they")
+        print("  already hold and blocks persistent offenders.")
+        print("\n  This is a one-off diagnostic for when a group name stops")
+        print("  resolving - not something to run routinely. If you need it:")
+        print("\n      python -m src.tle.fetcher --probe-groups --force\n")
+        return None
 
     if args.check_groups or args.probe_groups:
         which = _CANDIDATE_GROUPS if args.probe_groups else None
@@ -627,7 +707,8 @@ def main():
     groups = [args.group] if args.group else None
     _fetch_started = _time.monotonic()
     failed_groups: list = []
-    records = fetch_all(groups=groups, failures=failed_groups)
+    records = fetch_all(groups=groups, failures=failed_groups,
+                        force=args.force)
     _fetch_elapsed = _time.monotonic() - _fetch_started
 
     if args.dry_run:
