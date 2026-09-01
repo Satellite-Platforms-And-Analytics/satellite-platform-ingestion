@@ -46,43 +46,76 @@ def main() -> int:
         print(f"Could not connect: {type(exc).__name__}: {str(exc)[:200]}")
         return 3
 
-    with conn:
-        print("\n  Row counts")
-        print("  " + "-" * 44)
-        counts = {}
-        for t in TABLES:
-            try:
-                counts[t] = conn.execute(text(f"SELECT count(*) FROM {t}")).scalar()
-                print(f"    {t:<22}{counts[t]:>10,}")
-            except Exception as exc:
-                print(f"    {t:<22}{'ERR':>10}  {str(exc)[:40]}")
-
-        # Freshest TLE epoch tells us when data last actually arrived
-        newest = None
-        for table, col in (("tle_history", "epoch"), ("satellites", "updated_at"),
-                           ("orbital_positions", "timestamp")):
-            try:
-                v = conn.execute(text(f"SELECT max({col}) FROM {table}")).scalar()
-                if v:
-                    print(f"\n    newest {table}.{col}: {v}")
-                    if newest is None or v > newest:
-                        newest = v
-            except Exception:
-                pass
-
-        print("\n  Last 5 ingestion_log entries")
-        print("  " + "-" * 44)
+    # Each probe runs in its own transaction: one bad column name must not
+    # poison every query that follows (it did, on the first run).
+    def q(sql):
         try:
-            rows = conn.execute(text(
-                "SELECT created_at, pipeline, status, message "
-                "FROM ingestion_log ORDER BY created_at DESC LIMIT 5")).fetchall()
-            if not rows:
-                print("    (empty - the pipeline has never logged a run)")
-            for r in rows:
-                print(f"    {str(r[0])[:19]}  {str(r[1])[:14]:<14} "
-                      f"{str(r[2])[:8]:<8} {str(r[3] or '')[:40]}")
+            with engine.connect() as c:
+                return c.execute(text(sql)).fetchall()
         except Exception as exc:
-            print(f"    ERR {str(exc)[:60]}")
+            return ("ERR", str(exc).split("\n")[0][:70])
+
+    print("\n  Row counts")
+    print("  " + "-" * 52)
+    counts = {}
+    for tbl in TABLES:
+        r = q(f"SELECT count(*) FROM {tbl}")
+        if isinstance(r, tuple):
+            print(f"    {tbl:<22}{'ERR':>10}  {r[1]}")
+        else:
+            counts[tbl] = r[0][0]
+            print(f"    {tbl:<22}{counts[tbl]:>12,}")
+
+    # ── liveness: when did OUR job last run? ─────────────────────────────────
+    # fetched_at is written by us; epoch belongs to the element set and comes
+    # from CelesTrak. Only fetched_at answers "is the pipeline running".
+    print("\n  Pipeline activity (fetched_at = when our job ran)")
+    print("  " + "-" * 52)
+    newest = None
+    for label, sql in [
+        ("newest tle_history.fetched_at", "SELECT max(fetched_at) FROM tle_history"),
+        ("newest satellites.last_updated", "SELECT max(last_updated) FROM satellites"),
+        ("newest ingestion_log.created_at", "SELECT max(created_at) FROM ingestion_log"),
+    ]:
+        r = q(sql)
+        if isinstance(r, tuple):
+            print(f"    {label:<32} ERR {r[1][:34]}")
+        elif r[0][0]:
+            v = r[0][0]
+            print(f"    {label:<32} {v}")
+            if newest is None or v > newest:
+                newest = v
+
+    # ── data sanity: element-set epochs ──────────────────────────────────────
+    print("\n  TLE epoch sanity")
+    print("  " + "-" * 52)
+    r = q("SELECT min(epoch), max(epoch), "
+          "count(*) FILTER (WHERE epoch > now() + interval '1 day') "
+          "FROM tle_history")
+    if isinstance(r, tuple):
+        print(f"    ERR {r[1]}")
+    else:
+        lo, hi, future = r[0]
+        print(f"    oldest epoch          {lo}")
+        print(f"    newest epoch          {hi}")
+        print(f"    dated >1d in future   {future:,}")
+        if future:
+            print("    ^ TLE epochs should never be in the future.")
+            print("      Either this machine's clock is behind, or the")
+            print("      fetcher is mis-parsing the OMM EPOCH field.")
+
+    print("\n  Last 5 ingestion_log entries")
+    print("  " + "-" * 52)
+    r = q("SELECT created_at, pipeline, step, status, records_processed, message "
+          "FROM ingestion_log ORDER BY created_at DESC LIMIT 5")
+    if isinstance(r, tuple):
+        print(f"    ERR {r[1]}")
+    elif not r:
+        print("    (empty - the pipeline has never logged a run)")
+    else:
+        for row in r:
+            print(f"    {str(row[0])[:19]}  {str(row[1])[:12]:<12} {str(row[2])[:10]:<10} "
+                  f"{str(row[3])[:7]:<7} {str(row[4] or ''):>7}  {str(row[5] or '')[:28]}")
 
     # ── verdict ──────────────────────────────────────────────────────────────
     print("\n  " + "=" * 44)
@@ -98,11 +131,19 @@ def main() -> int:
         newest = newest.replace(tzinfo=timezone.utc)
     age = datetime.now(timezone.utc) - newest
     hrs = age.total_seconds() / 3600
-    print(f"  Newest data is {hrs:.1f}h old ({age.days}d).")
+
+    if hrs < -1:
+        print(f"  Newest activity is {abs(hrs):.1f}h in the FUTURE.")
+        print("  VERDICT: CLOCK MISMATCH - this machine's clock disagrees with")
+        print("  the database. Check the system time before trusting anything")
+        print("  above. Cannot judge freshness.")
+        return 1
+
+    print(f"  Newest pipeline activity: {hrs:.1f}h ago.")
     if age < timedelta(hours=6):
         print("  VERDICT: ALIVE - the 2-hourly cron is running.")
         return 0
-    print("  VERDICT: STALE - nothing recent.")
+    print(f"  VERDICT: STALE - nothing for {age.days}d {hrs % 24:.0f}h.")
     print("  -> GitHub > repo > Actions tab. A scheduled workflow is")
     print("     auto-disabled after 60 days of repo inactivity; re-enable it.")
     return 1
