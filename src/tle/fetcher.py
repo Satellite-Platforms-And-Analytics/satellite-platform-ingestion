@@ -309,6 +309,56 @@ def fetch_group(group: str, session: requests.Session) -> list:
 
 # ── Main fetch function ───────────────────────────────────────────────────────
 
+#: Groups worth probing when CELESTRAK_GROUPS turns out to name something
+#: CelesTrak does not serve. Debris is catalogued as specific events, not
+#: one bucket, which is why a generic "debris" group never existed.
+_CANDIDATE_GROUPS = [
+    "noaa", "weather", "goes", "resource", "sarsat", "dmc", "tdrss",
+    "argos", "planet", "spire", "last-30-days", "analyst",
+    "cosmos-1408-debris", "cosmos-2251-debris", "iridium-33-debris",
+    "1999-025", "2012-044", "2019-006",
+    "science", "geodetic", "engineering", "education", "military",
+    "radar", "cubesat", "other", "amateur", "orbcomm", "globalstar",
+    "intelsat", "ses", "iridium", "iridium-NEXT", "swarm", "sbas",
+]
+
+
+def check_groups(candidates: Optional[list] = None) -> dict:
+    """
+    Ask CelesTrak which group names actually resolve.
+
+    CelesTrak answers an unknown group with HTTP 200 and a plain-text
+    body ('Invalid query: ... not found'), so a status check cannot catch
+    it - only parsing can. 'noaa' and 'debris' were configured for months
+    and failed on every run for exactly this reason.
+
+    Returns {group: (ok, detail)}.
+    """
+    import json as _j
+
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "SatellitePlatform/1.0 (research project)"
+    })
+    results = {}
+    for group in (candidates or list(CELESTRAK_GROUPS)):
+        try:
+            r = session.get(_group_url(group), timeout=30)
+            body = r.text.strip()
+            if body.lower().startswith("invalid query"):
+                results[group] = (False, body[:70])
+            else:
+                try:
+                    data = _j.loads(body)
+                    results[group] = (True, f"{len(data)} objects")
+                except ValueError:
+                    results[group] = (False, f"not JSON: {body[:50]}")
+        except Exception as exc:
+            results[group] = (False, f"{type(exc).__name__}: {exc}")
+        time.sleep(1.2)
+    return results
+
+
 def fetch_all(groups: Optional[list] = None,
               failures: Optional[list] = None) -> list:
     """
@@ -461,6 +511,14 @@ def main():
         "--list-groups", action="store_true",
         help="List available groups and exit"
     )
+    parser.add_argument(
+        "--check-groups", action="store_true",
+        help="Ask CelesTrak whether each configured group actually exists"
+    )
+    parser.add_argument(
+        "--probe-groups", action="store_true",
+        help="Probe a wider candidate list to find valid replacements"
+    )
     args = parser.parse_args()
 
     if args.list_groups:
@@ -476,6 +534,27 @@ def main():
                 "run with --dry-run to fetch without writing."
             )
             sys.exit(1)
+
+    if args.check_groups or args.probe_groups:
+        which = _CANDIDATE_GROUPS if args.probe_groups else None
+        label = "candidate" if args.probe_groups else "configured"
+        print(f"\n  Probing {label} groups against CelesTrak...\n")
+        results = check_groups(which)
+        bad = [g for g, (ok, _) in results.items() if not ok]
+        for g, (ok, detail) in results.items():
+            print(f"    {'OK  ' if ok else 'BAD '} {g:<22} {detail}")
+        print()
+        if args.probe_groups:
+            good = [g for g, (ok, _) in results.items() if ok]
+            print(f"  {len(good)} of {len(results)} candidates are valid.")
+        elif bad:
+            print(f"  {len(bad)} configured group(s) do not exist: "
+                  f"{', '.join(bad)}")
+            print("  Run with --probe-groups to find replacements.")
+            return None
+        else:
+            print("  All configured groups resolve.")
+        return None
 
     groups = [args.group] if args.group else None
     _fetch_started = _time.monotonic()
