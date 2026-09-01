@@ -140,12 +140,27 @@ def main() -> int:
         return 1
 
     print(f"  Newest pipeline activity: {hrs:.1f}h ago.")
-    if age < timedelta(hours=6):
-        print("  VERDICT: ALIVE - the 2-hourly cron is running.")
+
+    # Thresholds reflect what GitHub Actions actually delivers, not what the
+    # cron asks for. Scheduled workflows on the free tier are best-effort and
+    # are routinely delayed or dropped under load: a `0 */2 * * *` schedule
+    # was observed landing 8-12h apart on 2026-08-31. Treating a 3h gap as a
+    # failure would cry wolf on every run.
+    if age < timedelta(hours=14):
+        print("  VERDICT: ALIVE - runs are landing.")
+        if hrs > 4:
+            print(f"  (Cron asks for every 2h; last gap was {hrs:.0f}h. GitHub")
+            print("   throttles scheduled workflows - expected, not a fault.)")
         return 0
-    print(f"  VERDICT: STALE - nothing for {age.days}d {hrs % 24:.0f}h.")
-    print("  -> GitHub > repo > Actions tab. A scheduled workflow is")
-    print("     auto-disabled after 60 days of repo inactivity; re-enable it.")
+    if age < timedelta(hours=48):
+        print(f"  VERDICT: LAGGING - {hrs:.0f}h since the last run.")
+        print("  Longer than GitHub's usual throttling. Check the Actions tab")
+        print("  for failures before assuming it is fine.")
+        return 1
+    print(f"  VERDICT: STALE - nothing for {age.days}d.")
+    print("  -> GitHub > repo > Actions tab. Check for failed runs, and note")
+    print("     that a scheduled workflow is auto-disabled after 60 days of")
+    print("     repository inactivity.")
     return 1
 
 

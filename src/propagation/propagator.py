@@ -216,12 +216,20 @@ def propagate_batch(
     """
     when = when or datetime.now(timezone.utc)
     cutoff = when - timedelta(days=max_age_days)
+    # CelesTrak occasionally emits an element set stamped in the future
+    # (2 of 1.5M rows as of 2026-08-31). Those are bad data, and a future
+    # epoch would otherwise sail past the staleness check.
+    future_limit = when + timedelta(days=1)
     out: List[Dict[str, Any]] = []
-    stale = failed = 0
+    stale = future = failed = 0
 
     for tle in tles:
         try:
-            if _epoch_of(tle.satrec()) < cutoff:
+            epoch = _epoch_of(tle.satrec())
+            if epoch > future_limit:
+                future += 1
+                continue
+            if epoch < cutoff:
                 stale += 1
                 continue
         except Exception:
@@ -234,8 +242,8 @@ def propagate_batch(
         else:
             out.append(row)
 
-    log.info("Propagated %d satellites (%d stale >%dd, %d failed).",
-             len(out), stale, max_age_days, failed)
+    log.info("Propagated %d satellites (%d stale >%dd, %d future-dated, %d failed).",
+             len(out), stale, max_age_days, future, failed)
     return out
 
 
@@ -314,6 +322,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="After writing, delete positions older than 48h")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
+
+    # Load .env so DATABASE_URL is available when run by hand. In GitHub
+    # Actions the variable comes from repository secrets and there is no
+    # .env file; python-dotenv is a no-op there.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
