@@ -309,10 +309,17 @@ def fetch_group(group: str, session: requests.Session) -> list:
 
 # ── Main fetch function ───────────────────────────────────────────────────────
 
-def fetch_all(groups: Optional[list] = None) -> list:
+def fetch_all(groups: Optional[list] = None,
+              failures: Optional[list] = None) -> list:
     """
     Fetch GP data from CelesTrak for specified groups (or all if None).
     Returns a deduplicated (by norad_id) list of TLERecord objects.
+
+    Pass a list as `failures` to be told which groups returned nothing.
+    A group can fail because CelesTrak throttled the request (transient)
+    or because the group name is not one CelesTrak serves (permanent).
+    Either way the run should not report unqualified success - two of
+    fifteen groups were failing silently on every run until 2026-09-01.
     """
     target_groups = groups or list(CELESTRAK_GROUPS)
     all_records = []
@@ -334,6 +341,8 @@ def fetch_all(groups: Optional[list] = None) -> list:
             continue
 
         records = fetch_group(group, session)
+        if not records and failures is not None:
+            failures.append(group)
 
         new_records = []
         for r in records:
@@ -347,6 +356,9 @@ def fetch_all(groups: Optional[list] = None) -> list:
         time.sleep(1)
 
     print(f"\n{'=' * 55}")
+    if failures:
+        print(f"  WARNING: {len(failures)} of {len(target_groups)} groups "
+              f"returned nothing: {', '.join(failures)}")
     print(f"  Total unique satellites: {len(all_records)}")
 
     regimes = {}
@@ -467,7 +479,8 @@ def main():
 
     groups = [args.group] if args.group else None
     _fetch_started = _time.monotonic()
-    records = fetch_all(groups=groups)
+    failed_groups: list = []
+    records = fetch_all(groups=groups, failures=failed_groups)
     _fetch_elapsed = _time.monotonic() - _fetch_started
 
     if args.dry_run:
@@ -478,7 +491,13 @@ def main():
         return records
 
     run_id = new_run_id()
-    log_step(run_id, pipeline="tle_fetch", step="fetch", status="success",
+    # 'partial' is in the schema's status vocabulary and had never been
+    # used: a run where some groups failed was indistinguishable from a
+    # clean one, which is how noaa and debris failed unnoticed.
+    log_step(run_id, pipeline="tle_fetch", step="fetch",
+              status="partial" if failed_groups else "success",
+              message=(f"groups returned nothing: {', '.join(failed_groups)}"
+                       if failed_groups else None),
               records_processed=len(records), source="celestrak",
               duration_s=_fetch_elapsed)
 
