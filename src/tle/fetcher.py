@@ -64,6 +64,7 @@ import time
 import logging
 import argparse
 import json as _json
+import time as _time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional
@@ -372,6 +373,8 @@ def write_records_to_db(records: list, run_id: str) -> int:
             f"or run with --dry-run to skip the database step."
         )
 
+    _write_started = _time.monotonic()
+
     satellite_rows = [
         {
             "norad_id": r.norad_id,
@@ -409,6 +412,7 @@ def write_records_to_db(records: list, run_id: str) -> int:
     log_step(
         run_id, pipeline="tle_fetch", step="write_db", status="success",
         records_processed=n, source="celestrak",
+        duration_s=_time.monotonic() - _write_started,
     )
     return n
 
@@ -454,7 +458,9 @@ def main():
             sys.exit(1)
 
     groups = [args.group] if args.group else None
+    _fetch_started = _time.monotonic()
     records = fetch_all(groups=groups)
+    _fetch_elapsed = _time.monotonic() - _fetch_started
 
     if args.dry_run:
         print("DRY RUN -- no database write. Showing first 5 records:")
@@ -465,7 +471,8 @@ def main():
 
     run_id = new_run_id()
     log_step(run_id, pipeline="tle_fetch", step="fetch", status="success",
-              records_processed=len(records), source="celestrak")
+              records_processed=len(records), source="celestrak",
+              duration_s=_fetch_elapsed)
 
     try:
         n = write_records_to_db(records, run_id)
@@ -474,6 +481,11 @@ def main():
         log_step(run_id, pipeline="tle_fetch", step="write_db",
                   status="failed", message=str(exc), source="celestrak")
         raise
+    # NOTE: a GitHub Actions timeout kills the process outright - no
+    # exception, so nothing reaches the except above. That is why the
+    # failed writes of 2026-08-26..31 left no 'failed' rows, only an
+    # absent write_db step. A missing write_db is therefore a signal in
+    # its own right; check_write_speed.py reports those explicitly.
 
     return records
 
