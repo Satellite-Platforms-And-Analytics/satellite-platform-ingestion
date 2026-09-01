@@ -51,11 +51,34 @@ from satellite_utils import load_satellites
 N2YO_API_KEY = os.environ.get("N2YO_API_KEY")
 N2YO_BASE = "https://api.n2yo.com/rest/v1/satellite"
 
+# ── N2YO usage policy ────────────────────────────────────────────────────────
+#
+# N2YO's free tier allows 1,000 transactions per hour PER ENDPOINT CATEGORY
+# (https://www.n2yo.com/api/). This script uses only /positions, so its
+# budget is 1,000/hour on its own. One run = NUM_SATELLITES_TO_CHECK
+# requests (one per satellite; the offsets come back inside a single
+# response), so the default of 5 is negligible.
+#
+# Every N2YO response carries info.transactionscount - our usage this hour,
+# reported by them. It was being discarded. It is now read, displayed, and
+# used to stop before the cap rather than discovering the limit by hitting
+# it. This project has had an API account suspended before (see
+# src/tracking/spacetrack_policy_check.py); being told our own usage and
+# ignoring it would be careless.
+N2YO_HOURLY_LIMIT = 1000        # per endpoint category, free tier
+N2YO_SAFETY_MARGIN = 100        # stop this far short of the limit
+REQUEST_SPACING_SEC = 1         # courtesy delay between satellites
+
 # How many satellites to spot-check, and how many seconds of
 # position data to request from N2YO for each (matched against
 # this project's own calculation at the same offsets).
 NUM_SATELLITES_TO_CHECK = 5
 CHECK_OFFSETS_SEC = [0, 60, 120]
+
+#: Refuse to run above this. This is a spot-check for methodology, not a
+#: bulk data source - if it ever needs hundreds of satellites, the right
+#: answer is a different approach, not a bigger number here.
+MAX_SATELLITES_ALLOWED = 25
 
 
 def get_n2yo_positions(norad_id, lat, lon, alt_m, seconds, timeout_sec=30):
@@ -82,12 +105,23 @@ def get_n2yo_positions(norad_id, lat, lon, alt_m, seconds, timeout_sec=30):
     response.raise_for_status()
     data = response.json()
 
+    # N2YO reports our usage for the current hour in every response.
+    used = (data.get("info") or {}).get("transactionscount")
+    if used is not None:
+        remaining = N2YO_HOURLY_LIMIT - used
+        if remaining <= N2YO_SAFETY_MARGIN:
+            raise RuntimeError(
+                f"Stopping: {used} of {N2YO_HOURLY_LIMIT} N2YO transactions "
+                f"used this hour, only {remaining} left. Wait for the hourly "
+                f"reset rather than risking the account."
+            )
+
     if "positions" not in data or not data["positions"]:
         raise RuntimeError(
             data.get("error", "N2YO returned no position data for this satellite.")
         )
 
-    return data["positions"]
+    return data["positions"], used
 
 
 def main():
@@ -117,6 +151,13 @@ def main():
             "free key at https://www.n2yo.com/api/"
         )
 
+    if NUM_SATELLITES_TO_CHECK > MAX_SATELLITES_ALLOWED:
+        raise RuntimeError(
+            f"NUM_SATELLITES_TO_CHECK is {NUM_SATELLITES_TO_CHECK}, above the "
+            f"{MAX_SATELLITES_ALLOWED} cap. This is a methodology spot-check, "
+            f"not a bulk source - one request per satellite goes to N2YO."
+        )
+
     print("Loading locally cached satellite catalog...")
     satellites, ts = load_satellites(TLE_FILE)
 
@@ -139,9 +180,19 @@ def main():
         print(f"--- {sat.name} (NORAD {satnum}) ---")
 
         try:
-            n2yo_positions = get_n2yo_positions(
+            n2yo_positions, used = get_n2yo_positions(
                 satnum, SENSOR_LAT, SENSOR_LON, SENSOR_ELEV_M, max_offset + 1
             )
+            if used is not None:
+                print(f"  (N2YO transactions used this hour: {used} of "
+                      f"{N2YO_HOURLY_LIMIT})")
+        except RuntimeError as e:
+            # A budget stop is not a per-satellite failure - stop the run.
+            if "Stopping:" in str(e):
+                print(f"\n  {e}\n")
+                return
+            print(f"  N2YO lookup failed: {e}\n")
+            continue
         except Exception as e:
             print(f"  N2YO lookup failed: {e}\n")
             continue
@@ -185,9 +236,9 @@ def main():
 
         print()
 
-        # Be polite about request rate even though the free tier
-        # allows up to 1000/hour.
-        time.sleep(1)
+        # Courtesy delay; the free tier allows 1,000/hour but there is no
+        # reason to approach it for a five-satellite spot-check.
+        time.sleep(REQUEST_SPACING_SEC)
 
 
 if __name__ == "__main__":
