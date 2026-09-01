@@ -157,19 +157,22 @@ _SATELLITE_COLUMNS = [
     "mean_motion", "eccentricity", "source",
 ]
 
-_UPSERT_SATELLITE_SQL = text(f"""
+_UPSERT_SATELLITE_SQL = f"""
     INSERT INTO satellites (
         {", ".join(_SATELLITE_COLUMNS)}, last_updated
-    ) VALUES (
-        {", ".join(f":{c}" for c in _SATELLITE_COLUMNS)}, now()
-    )
+    ) VALUES %s
     ON CONFLICT (norad_id) DO UPDATE SET
         {", ".join(
             f"{c} = COALESCE(EXCLUDED.{c}, satellites.{c})"
             for c in _SATELLITE_COLUMNS if c != "norad_id"
         )},
         last_updated = now()
-""")
+"""
+
+#: execute_values substitutes this per row; now() is evaluated server-side.
+_SATELLITE_VALUES_TEMPLATE = (
+    "(" + ", ".join(["%s"] * len(_SATELLITE_COLUMNS)) + ", now())"
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -188,6 +191,7 @@ _UPSERT_SATELLITE_SQL = text(f"""
 
 def _bulk_upsert(sql_with_values: str,
                  rows: "list[tuple]",
+                 template: "str | None" = None,
                  page_size: int = 1000) -> int:
     """
     Execute a multi-row INSERT via psycopg2's execute_values.
@@ -195,15 +199,30 @@ def _bulk_upsert(sql_with_values: str,
     `sql_with_values` must contain a single `%s` placeholder where the
     VALUES tuples go, e.g.
         INSERT INTO t (a, b) VALUES %s ON CONFLICT (a) DO UPDATE SET ...
+
+    `template` overrides the per-row tuple, for cases where a column is
+    computed server-side (e.g. "(%s, %s, now())").
     """
     if not rows:
         return 0
+
+    # A tuple whose arity does not match the template would silently shift
+    # values into the wrong columns. Fail loudly instead.
+    if template is not None:
+        expected = template.count("%s")
+        bad = next((r for r in rows if len(r) != expected), None)
+        if bad is not None:
+            raise ValueError(
+                f"row arity {len(bad)} does not match template arity {expected}"
+            )
+
     from psycopg2.extras import execute_values
 
     raw = get_engine().raw_connection()
     try:
         with raw.cursor() as cur:
-            execute_values(cur, sql_with_values, rows, page_size=page_size)
+            execute_values(cur, sql_with_values, rows,
+                           template=template, page_size=page_size)
         raw.commit()
     except Exception:
         raw.rollback()
@@ -236,17 +255,19 @@ def upsert_satellites(satellites: Iterable[Mapping[str, Any]]) -> int:
         if r.get("norad_id") is None:
             raise ValueError(f"satellite row missing norad_id: {r}")
 
-    with _tx() as conn:
-        conn.execute(_UPSERT_SATELLITE_SQL, rows)
-    logger.info("Upserted %d satellite rows.", len(rows))
-    return len(rows)
+    tuples = [tuple(r.get(c) for c in _SATELLITE_COLUMNS) for r in rows]
+    written = _bulk_upsert(_UPSERT_SATELLITE_SQL, tuples,
+                           template=_SATELLITE_VALUES_TEMPLATE)
+    logger.info("Upserted %d satellite rows.", written)
+    return written
 
 
-_INSERT_TLE_HISTORY_SQL = text("""
+_INSERT_TLE_HISTORY_SQL = """
     INSERT INTO tle_history (norad_id, line1, line2, epoch, source)
-    VALUES (:norad_id, :line1, :line2, :epoch, :source)
+    VALUES %s
     ON CONFLICT (norad_id, epoch) DO NOTHING
-""")
+"""
+_TLE_HISTORY_COLUMNS = ["norad_id", "line1", "line2", "epoch", "source"]
 
 
 def insert_tle_history(records: Iterable[Mapping[str, Any]]) -> int:
@@ -272,8 +293,8 @@ def insert_tle_history(records: Iterable[Mapping[str, Any]]) -> int:
     ]
     if not rows:
         return 0
-    with _tx() as conn:
-        conn.execute(_INSERT_TLE_HISTORY_SQL, rows)
+    tuples = [tuple(r.get(c) for c in _TLE_HISTORY_COLUMNS) for r in rows]
+    _bulk_upsert(_INSERT_TLE_HISTORY_SQL, tuples)
     logger.info("Inserted up to %d tle_history rows (duplicates skipped).", len(rows))
     return len(rows)
 
