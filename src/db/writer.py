@@ -172,6 +172,47 @@ _UPSERT_SATELLITE_SQL = text(f"""
 """)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Bulk write helper
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# SQLAlchemy cannot batch a textual (`text()`) statement. Passing a list of
+# dicts to conn.execute(text(...), rows) falls through to plain
+# cursor.executemany(), which is one network round-trip PER ROW. Against
+# Supabase that measured ~14 rows/sec - 496 orbital positions took 35s, and
+# a full 16,720-satellite pass would have blown the workflow timeout.
+#
+# psycopg2's execute_values collapses the whole batch into a single
+# multi-row INSERT ... VALUES (...), (...), ... statement. Same SQL
+# semantics, same ON CONFLICT behaviour, one round-trip per page.
+
+def _bulk_upsert(sql_with_values: str,
+                 rows: "list[tuple]",
+                 page_size: int = 1000) -> int:
+    """
+    Execute a multi-row INSERT via psycopg2's execute_values.
+
+    `sql_with_values` must contain a single `%s` placeholder where the
+    VALUES tuples go, e.g.
+        INSERT INTO t (a, b) VALUES %s ON CONFLICT (a) DO UPDATE SET ...
+    """
+    if not rows:
+        return 0
+    from psycopg2.extras import execute_values
+
+    raw = get_engine().raw_connection()
+    try:
+        with raw.cursor() as cur:
+            execute_values(cur, sql_with_values, rows, page_size=page_size)
+        raw.commit()
+    except Exception:
+        raw.rollback()
+        raise
+    finally:
+        raw.close()
+    return len(rows)
+
+
 def upsert_satellites(satellites: Iterable[Mapping[str, Any]]) -> int:
     """
     Upsert satellite catalog rows keyed on norad_id.
@@ -274,25 +315,41 @@ def upsert_orbital_positions(positions: Iterable[Mapping[str, Any]]) -> int:
     table bounded to the last 48 hours.
     """
     rows = [
-        {
-            "norad_id": p["norad_id"],
-            "timestamp": p["timestamp"],
-            "latitude": p["latitude"],
-            "longitude": p["longitude"],
-            "altitude_km": p["altitude_km"],
-            "velocity_km_s": p.get("velocity_km_s"),
-            "azimuth_deg": p.get("azimuth_deg"),
-            "elevation_deg": p.get("elevation_deg"),
-            "range_km": p.get("range_km"),
-        }
+        (
+            p["norad_id"],
+            p["timestamp"],
+            p["latitude"],
+            p["longitude"],
+            p["altitude_km"],
+            p.get("velocity_km_s"),
+            p.get("azimuth_deg"),
+            p.get("elevation_deg"),
+            p.get("range_km"),
+        )
         for p in positions
     ]
     if not rows:
         return 0
-    with _tx() as conn:
-        conn.execute(_UPSERT_POSITION_SQL, rows)
-    logger.info("Upserted %d orbital_positions rows.", len(rows))
-    return len(rows)
+
+    written = _bulk_upsert(
+        """
+        INSERT INTO orbital_positions (
+            norad_id, timestamp, latitude, longitude, altitude_km,
+            velocity_km_s, azimuth_deg, elevation_deg, range_km
+        ) VALUES %s
+        ON CONFLICT (norad_id, timestamp) DO UPDATE SET
+            latitude      = EXCLUDED.latitude,
+            longitude     = EXCLUDED.longitude,
+            altitude_km   = EXCLUDED.altitude_km,
+            velocity_km_s = EXCLUDED.velocity_km_s,
+            azimuth_deg   = EXCLUDED.azimuth_deg,
+            elevation_deg = EXCLUDED.elevation_deg,
+            range_km      = EXCLUDED.range_km
+        """,
+        rows,
+    )
+    logger.info("Upserted %d orbital_positions rows.", written)
+    return written
 
 
 def prune_old_positions(hours: int = 48) -> int:
