@@ -111,11 +111,46 @@ except ImportError:
 # CelesTrak's published group list (celestrak.org/NORAD/elements/).
 _GP_BASE_URL = "https://celestrak.org/NORAD/elements/gp.php"
 
+# Verified against CelesTrak 2026-09-01 with --check-groups; counts from
+# that probe. CelesTrak answers an unknown group with HTTP 200 and a
+# plain-text "Invalid query" body, so a name that stops existing will not
+# raise - run --check-groups after editing this list.
+#
+# Deliberately NOT exhaustive. Most CelesTrak groups (sarsat, planet,
+# spire, intelsat, ses, cubesat, military, ...) are subsets of 'active'
+# and dedupe away by norad_id, and the group an object arrived under is
+# not persisted - so fetching them costs requests and throttle exposure
+# for nothing. --probe-groups lists 28 valid names if that changes and
+# per-group provenance becomes worth storing.
 CELESTRAK_GROUPS = [
-    "active", "stations", "visual", "weather", "noaa", "goes",
-    "resource", "starlink", "oneweb", "gps-ops", "glo-ops", "galileo",
-    "beidou", "geo", "debris",
+    "active",          # ~16,463  everything active and on orbit
+    "stations",        # 22
+    "visual",          # 157
+    "weather",         # 74   NOAA weather satellites live here; the
+                       #      configured 'noaa' group never existed
+    "goes",            # 6
+    "resource",        # 167
+    "starlink",        # ~11,034
+    "oneweb",          # 651
+    "gps-ops",         # 32
+    "glo-ops",         # 29
+    "galileo",         # 31
+    "beidou",          # 54
+    "geo",             # 568
+
+    # Objects 'active' does not contain.
+    "analyst",         # 568  uncorrelated / analyst objects
+
+    # Debris. CelesTrak catalogues debris by originating event, never as a
+    # single bucket - the configured 'debris' group never existed, so this
+    # platform has been running with no debris whatsoever despite
+    # satellites.object_type defining DEBRIS and Phase 1 naming
+    # conjunction and SSA work. Replaced 2026-09-01.
+    "cosmos-2251-debris",   # 584
+    "iridium-33-debris",    # 111
+    "cosmos-1408-debris",   # 3
 ]
+
 
 # Same throttle notice CelesTrak returns if a group is requested again
 # before its 2-hour update window has passed (see src/tle/gp_json.py,
@@ -279,13 +314,33 @@ def fetch_url(url: str, session: requests.Session) -> Optional[str]:
     return None
 
 
-def fetch_group(group: str, session: requests.Session) -> list:
-    """Fetch and parse one GP group as JSON."""
+def fetch_group(group: str, session: requests.Session,
+                status_out: Optional[dict] = None) -> list:
+    """
+    Fetch and parse one GP group as JSON.
+
+    An empty result has three very different meanings, and the caller
+    needs to tell them apart:
+
+      throttled  CelesTrak already served us this group inside its 2-hour
+                 update window. Benign - there is nothing new to fetch.
+      invalid    The group name is not one CelesTrak serves. A permanent
+                 configuration error. ('noaa' and 'debris' sat in
+                 CELESTRAK_GROUPS for months failing this way.)
+      error      Network failure or unparseable response.
+
+    Pass a dict as `status_out` to receive {group: reason}.
+    """
+    def _flag(reason):
+        if status_out is not None:
+            status_out[group] = reason
+
     log.info(f"  Fetching {group}...")
     url = _group_url(group, fmt="json")
     text = fetch_url(url, session)
     if not text:
         log.error(f"  Failed to fetch {group}")
+        _flag("error")
         return []
 
     if _CELESTRAK_THROTTLE_MARKER in text:
@@ -294,12 +349,20 @@ def fetch_group(group: str, session: requests.Session) -> list:
             f"before the 2-hour update window) -- skipping this group "
             f"for this run."
         )
+        _flag("throttled")
+        return []
+
+    if text.strip().lower().startswith("invalid query"):
+        log.error(f"  {group}: CelesTrak does not serve this group -- "
+                  f"{text.strip()[:80]}")
+        _flag("invalid")
         return []
 
     try:
         records = _json.loads(text)
     except ValueError as exc:
         log.error(f"  {group}: response was not valid JSON: {exc}")
+        _flag("error")
         return []
 
     parsed = parse_gp_json(records, group)
@@ -345,7 +408,10 @@ def check_groups(candidates: Optional[list] = None) -> dict:
         try:
             r = session.get(_group_url(group), timeout=30)
             body = r.text.strip()
-            if body.lower().startswith("invalid query"):
+            if _CELESTRAK_THROTTLE_MARKER in body:
+                # Valid group, fetched recently. Not a fault.
+                results[group] = (True, "throttled (fetched within 2h)")
+            elif body.lower().startswith("invalid query"):
                 results[group] = (False, body[:70])
             else:
                 try:
@@ -390,9 +456,11 @@ def fetch_all(groups: Optional[list] = None,
             log.warning(f"Unknown group: {group} -- skipping")
             continue
 
-        records = fetch_group(group, session)
-        if not records and failures is not None:
-            failures.append(group)
+        status: dict = {}
+        records = fetch_group(group, session, status_out=status)
+        reason = status.get(group)
+        if reason and reason != "throttled" and failures is not None:
+            failures.append(f"{group} ({reason})")
 
         new_records = []
         for r in records:
