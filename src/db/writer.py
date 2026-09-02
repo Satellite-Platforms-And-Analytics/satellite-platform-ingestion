@@ -424,16 +424,18 @@ def get_sensor_id(short_name: str) -> int:
 # VISIBILITY WINDOWS
 # =====================================================
 
-_UPSERT_VISIBILITY_SQL = text("""
+#: Tuple order for the batched insert below. The payload dicts are converted
+#: to tuples using exactly this list, so the two cannot drift apart.
+_VISIBILITY_COLUMNS = [
+    "norad_id", "sensor_id", "analysis_date", "window_start", "window_end",
+    "hour_bin", "max_elevation", "max_azimuth", "min_range_km",
+    "orbit_regime", "confidence_score",
+]
+
+_UPSERT_VISIBILITY_SQL = f"""
     INSERT INTO visibility_windows (
-        norad_id, sensor_id, analysis_date, window_start, window_end,
-        hour_bin, max_elevation, max_azimuth, min_range_km,
-        orbit_regime, confidence_score
-    ) VALUES (
-        :norad_id, :sensor_id, :analysis_date, :window_start, :window_end,
-        :hour_bin, :max_elevation, :max_azimuth, :min_range_km,
-        :orbit_regime, :confidence_score
-    )
+        {", ".join(_VISIBILITY_COLUMNS)}
+    ) VALUES %s
     ON CONFLICT (norad_id, sensor_id, window_start) DO UPDATE SET
         window_end       = EXCLUDED.window_end,
         hour_bin          = EXCLUDED.hour_bin,
@@ -442,7 +444,7 @@ _UPSERT_VISIBILITY_SQL = text("""
         min_range_km      = EXCLUDED.min_range_km,
         orbit_regime      = EXCLUDED.orbit_regime,
         confidence_score  = COALESCE(EXCLUDED.confidence_score, visibility_windows.confidence_score)
-""")
+"""
 
 
 def insert_visibility_windows(
@@ -511,13 +513,18 @@ def insert_visibility_windows(
     if not payload:
         return 0
 
-    with _tx() as conn:
-        conn.execute(_UPSERT_VISIBILITY_SQL, payload)
+    # Batched, not executemany. Visibility runs produce more rows than the
+    # TLE fetch does - satellites x sensors x hour bins - and the per-row
+    # path silently discarded a week of TLE writes when it hit the workflow
+    # timeout (2026-08-26..31). Converted before this table's first real
+    # run rather than after.
+    tuples = [tuple(row[c] for c in _VISIBILITY_COLUMNS) for row in payload]
+    written = _bulk_upsert(_UPSERT_VISIBILITY_SQL, tuples)
     logger.info(
         "Upserted %d visibility_windows rows for sensor=%s on %s.",
-        len(payload), sensor_short_name, analysis_date,
+        written, sensor_short_name, analysis_date,
     )
-    return len(payload)
+    return written
 
 
 # =====================================================
@@ -562,6 +569,9 @@ def upsert_imagery_scene(scene: Mapping[str, Any]) -> None:
 
     payload.setdefault("status", "processed")
 
+    # Deliberately not batched: this writes ONE scene per call (imagery is
+    # ingested a scene at a time), so there is no executemany here to be
+    # slow. Do not "fix" this to match the other writers.
     with _tx() as conn:
         conn.execute(_UPSERT_IMAGERY_SQL, payload)
     logger.info("Upserted imagery_scenes row for scene_id=%s.", payload["scene_id"])
