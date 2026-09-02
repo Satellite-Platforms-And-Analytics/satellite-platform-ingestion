@@ -54,6 +54,20 @@ concurrency:
   group: ingest-tle
   cancel-in-progress: false
 
+# RETENTION: --prune-history keeps 14 days of tle_history.
+#
+#   Measured 2026-09-01: 1,574,305 rows, 515 MB - 86% of a 597 MB
+#   database against a 500 MB tier, with nothing bounding it while
+#   orbital_positions and visibility_windows both had retention. The rows
+#   are legitimate (1-3 new element sets per satellite per day, real
+#   CelesTrak churn), so this is a budget limit, not a bug fix.
+#
+#   14 days holds ~113 MB. Widen it when the tier allows.
+#
+#   A DELETE does not return space to the filesystem and Supabase bills
+#   on the file, so the first reclaim needs the VACUUM FULL in
+#   cleanup_tle_history.py. After that this step keeps it flat.
+
 jobs:
   ingest:
     runs-on: ubuntu-latest
@@ -84,4 +98,4 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          python src/tle/fetcher.py ${{ github.event_name == 'workflow_dispatch' && inputs.group != '' && format('--group {0}', inputs.group) || '' }}
+          python src/tle/fetcher.py --prune-history ${{ github.event_name == 'workflow_dispatch' && inputs.group != '' && format('--group {0}', inputs.group) || '' }}

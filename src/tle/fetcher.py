@@ -658,6 +658,16 @@ def main():
         "--force", action="store_true",
         help="Bypass the 2-hour re-fetch guard, and permit --probe-groups"
     )
+    parser.add_argument(
+        "--prune-history", action="store_true",
+        help="After writing, delete tle_history rows older than "
+             "--history-days. tle_history had no retention policy and "
+             "reached 515 MB of a 500 MB tier on 2026-09-01."
+    )
+    parser.add_argument(
+        "--history-days", type=int, default=14,
+        help="tle_history retention window (default 14)"
+    )
     args = parser.parse_args()
 
     if args.list_groups:
@@ -736,6 +746,14 @@ def main():
         log_step(run_id, pipeline="tle_fetch", step="write_db",
                   status="failed", message=str(exc), source="celestrak")
         raise
+    if args.prune_history and not args.dry_run and _WRITER_AVAILABLE:
+        # Bounded here rather than in its own workflow: the rows arrive
+        # with this job, so they should leave with it. A DELETE does not
+        # return space to the filesystem - see cleanup_tle_history.py for
+        # the VACUUM FULL that does.
+        from src.db.writer import prune_old_tle_history
+        prune_old_tle_history(days=args.history_days)
+
     # NOTE: a GitHub Actions timeout kills the process outright - no
     # exception, so nothing reaches the except above. That is why the
     # failed writes of 2026-08-26..31 left no 'failed' rows, only an

@@ -54,12 +54,20 @@ DEFAULT_BIN_HOURS = 1
 #: propagator: SGP4 error grows quickly and a stale set is confidently wrong.
 DEFAULT_MAX_AGE_DAYS = 14
 
-#: Retention. Measured 2026-09-01 on the live 18,044-object catalogue:
-#: 221,788 windows per day across the three sensors. Seven days is the
-#: window chosen against a 500 MB tier from an estimated ~180 bytes per
-#: row - the job logs the table's real size after each write so that
-#: estimate can be replaced with a measurement.
-DEFAULT_RETENTION_DAYS = 7
+#: Retention, against a 500 MB tier.
+#:
+#: Measured 2026-09-01 on the live 18,044-object catalogue: 221,788
+#: windows per day across the three sensors, at a measured 215 bytes per
+#: row - so 47.7 MB every day. Seven days would be 334 MB, and
+#: tle_history needs 113 MB of the same budget once pruned. Three days is
+#: 143 MB and leaves the database around 291 MB with room to grow.
+#:
+#: This started at 7 from an estimated 180 bytes/row. The estimate was
+#: 19% low and the tier was already 97 MB over, so the number moved. The
+#: job reports the table's real size after every write; widen this the
+#: moment the budget allows, because coverage statistics want more days
+#: than three.
+DEFAULT_RETENTION_DAYS = 3
 
 #: Individual element sets do fail to parse; a run where most of them do is
 #: a bug in this module, not bad data, and must not exit 0 with an empty

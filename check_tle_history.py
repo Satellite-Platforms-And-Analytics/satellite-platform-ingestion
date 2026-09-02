@@ -111,6 +111,29 @@ def main() -> int:
                 print(f"    {e}   {gap}")
                 prev = e
 
+        # ── Near-duplicate epochs ─────────────────────────────────────
+        # A TLE epoch carries ~0.86 ms of real precision. Two rows for the
+        # same satellite less than a second apart are the same element set
+        # rendered twice - the same object arriving in two of the five
+        # groups we fetch, each rounding EPOCH slightly differently.
+        # UNIQUE (norad_id, epoch) cannot see it because the timestamps
+        # do differ. This counts what that costs.
+        print("\nNear-duplicate epochs (same satellite, <1s apart):")
+        for label, window in (("< 1 ms", "0.001"), ("< 1 s", "1"),
+                              ("< 60 s", "60")):
+            n = q(conn, """
+                SELECT count(*) FROM (
+                    SELECT epoch - lag(epoch) OVER (PARTITION BY norad_id
+                                                    ORDER BY epoch) AS gap
+                      FROM tle_history
+                ) t
+                WHERE gap IS NOT NULL
+                  AND gap < make_interval(secs => :w)
+            """, w=float(window))[0][0]
+            print(f"  {label:<8}{n:>10,} rows "
+                  f"({n*100.0/max(total,1):4.1f}%, "
+                  f"{n*size/max(total,1)/1e6:5.0f} MB)")
+
         # ── What retention would buy ──────────────────────────────────
         print("\nIf tle_history were pruned:")
         for days in (7, 14, 30, 60):

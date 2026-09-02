@@ -270,6 +270,48 @@ _INSERT_TLE_HISTORY_SQL = """
 _TLE_HISTORY_COLUMNS = ["norad_id", "line1", "line2", "epoch", "source"]
 
 
+def _as_datetime(value: Any) -> Any:
+    """Parse CelesTrak's ISO EPOCH string; pass anything else through."""
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value                      # let the server judge it
+    return value
+
+
+def _dedupe_key(norad_id: Any, epoch: Any) -> tuple:
+    """
+    Identity of an element set for within-batch deduplication.
+
+    THE PROBLEM. One fetch run pulls five CelesTrak groups and writes
+    them as a single batch. An object listed in two of those groups
+    arrives twice, and the two copies carry epochs that differ in the
+    last representable digit of the TLE format - observed on object
+    69235, two rows 864 microseconds apart. UNIQUE (norad_id, epoch)
+    cannot merge them because the timestamps really are different, so
+    both are stored.
+
+    WHY NOT ROUND THE STORED VALUE. Tried first, and it fails on exactly
+    the case that motivated it: 376672 and 375808 microseconds round to
+    different milliseconds because they straddle a boundary. Any
+    fixed-width bucket has boundary pairs. Coarsening far enough to be
+    safe (whole seconds) would also mean storing an epoch that no longer
+    matches the element set's own lines, which is a worse trade than the
+    duplicate rows.
+
+    So: full precision is stored, and the key used to spot duplicates
+    *within a batch* is truncated to the second. Genuine element sets for
+    one satellite are hours apart, never one second, so this cannot merge
+    two real observations - and duplicates arriving in later runs are
+    still caught by the unique constraint, because the same source data
+    renders identically each time.
+    """
+    if isinstance(epoch, datetime):
+        epoch = epoch.replace(microsecond=0)
+    return (norad_id, epoch)
+
+
 def insert_tle_history(records: Iterable[Mapping[str, Any]]) -> int:
     """
     Append raw TLE records for archival / confidence-scoring reuse.
@@ -281,16 +323,39 @@ def insert_tle_history(records: Iterable[Mapping[str, Any]]) -> int:
     the same satellite, the second insert is silently skipped rather than
     erroring. Requires the satellite to already exist (FK).
     """
-    rows = [
-        {
+    horizon = datetime.now(timezone.utc) + timedelta(days=1)
+    rows, future, dupes = [], 0, 0
+    seen: set = set()
+    for r in records:
+        epoch = _as_datetime(r["epoch"])
+
+        # CelesTrak occasionally emits element sets epoched days ahead.
+        # 2026-09-01: rows existed at 2026-09-07, six days out. The
+        # propagator already refuses to propagate anything more than a
+        # day future-dated, so these were never usable - only stored.
+        if isinstance(epoch, datetime) and epoch > horizon:
+            future += 1
+            continue
+
+        key = _dedupe_key(r["norad_id"], epoch)
+        if key in seen:
+            dupes += 1
+            continue
+        seen.add(key)
+
+        rows.append({
             "norad_id": r["norad_id"],
             "line1": r["line1"],
             "line2": r["line2"],
-            "epoch": r["epoch"],
+            "epoch": epoch,
             "source": r.get("source", "spacetrack"),
-        }
-        for r in records
-    ]
+        })
+    if future:
+        logger.warning("Skipped %d element set(s) epoched more than a day "
+                       "in the future.", future)
+    if dupes:
+        logger.info("Collapsed %d element set(s) listed in more than one "
+                    "CelesTrak group.", dupes)
     if not rows:
         return 0
     tuples = [tuple(r.get(c) for c in _TLE_HISTORY_COLUMNS) for r in rows]
@@ -525,6 +590,36 @@ def insert_visibility_windows(
         written, sensor_short_name, analysis_date,
     )
     return written
+
+
+def prune_old_tle_history(days: int = 14) -> int:
+    """
+    Delete tle_history rows epoched more than `days` ago.
+
+    Measured 2026-09-01: 1,574,305 rows, 515 MB - 86% of a 597 MB
+    database against a 500 MB tier. The rows are legitimate (1-3 new
+    element sets per satellite per day, not repeated fetches of the same
+    one), so this is a budget decision rather than a bug fix: at ~30,000
+    new rows a day the table grows about 10 MB daily and nothing bounded
+    it.
+
+    14 days keeps 113 MB and reclaims 78%. Widen it whenever the tier
+    allows - the confidence-scoring work this archive exists for wants
+    more history, not less.
+
+    NOTE: a DELETE marks rows dead but does not return their space to the
+    filesystem, and Supabase bills on what is on disk. After a large
+    prune run `VACUUM FULL tle_history;` (see cleanup_tle_history.py) or
+    the reported size will not move.
+    """
+    with _tx() as conn:
+        result = conn.execute(
+            text("DELETE FROM tle_history WHERE epoch < :cutoff"),
+            {"cutoff": datetime.now(timezone.utc) - timedelta(days=days)},
+        )
+        deleted = result.rowcount or 0
+    logger.info("Pruned %d tle_history rows older than %d days.", deleted, days)
+    return deleted
 
 
 def prune_old_visibility_windows(days: int = 7) -> int:

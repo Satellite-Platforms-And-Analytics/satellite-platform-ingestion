@@ -304,3 +304,53 @@ def test_end_before_start_is_rejected():
     with pytest.raises(ValueError, match="not after"):
         compute_visibility(FULL_SKY, [_fresh_tle()], date.today(),
                            start_hhmm="1200", end_hhmm="0600")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Element-set deduplication (db.writer)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_the_two_rows_observed_on_object_69235_collapse():
+    """
+    The real case: 864 microseconds apart, the same element set arriving
+    in two CelesTrak groups within one fetch. An earlier attempt rounded
+    the stored epoch to the millisecond and did NOT fix this - the two
+    values straddle a millisecond boundary. Keep this test pointed at the
+    actual observed values.
+    """
+    from src.db.writer import _dedupe_key
+
+    a = datetime(2026, 8, 25, 15, 13, 35, 376672, tzinfo=timezone.utc)
+    b = datetime(2026, 8, 25, 15, 13, 35, 375808, tzinfo=timezone.utc)
+    assert _dedupe_key(25544, a) == _dedupe_key(25544, b)
+
+
+def test_real_element_sets_hours_apart_stay_distinct():
+    from src.db.writer import _dedupe_key
+
+    a = datetime(2026, 8, 25, 15, 13, 35, 376672, tzinfo=timezone.utc)
+    later = datetime(2026, 8, 25, 18, 13, 35, 376672, tzinfo=timezone.utc)
+    assert _dedupe_key(25544, a) != _dedupe_key(25544, later)
+
+
+def test_the_same_epoch_for_different_satellites_stays_distinct():
+    from src.db.writer import _dedupe_key
+
+    e = datetime(2026, 8, 25, 15, 13, 35, tzinfo=timezone.utc)
+    assert _dedupe_key(25544, e) != _dedupe_key(25545, e)
+
+
+def test_celestrak_iso_strings_parse():
+    from src.db.writer import _as_datetime
+
+    out = _as_datetime("2026-08-25T15:13:35.376672Z")
+    assert isinstance(out, datetime)
+    assert out.tzinfo is not None
+    assert out.microsecond == 376672        # stored at full precision
+
+
+def test_unparseable_epoch_is_passed_through_not_swallowed():
+    """Let the server reject it loudly rather than inventing a value."""
+    from src.db.writer import _as_datetime
+
+    assert _as_datetime("not a timestamp") == "not a timestamp"

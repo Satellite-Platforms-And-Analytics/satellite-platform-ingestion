@@ -28,9 +28,13 @@
 #     MILLSTONE   103,083 windows    8.2 s
 #     total       221,788 windows   26.8 s compute
 #
-#   Plus ~160 s to write 221,788 rows at the measured 1,396 rows/sec, and
-#   a few seconds to load the catalogue once. About 3.5 minutes locally,
-#   so 20 minutes is roughly 3x headroom on a slower shared runner.
+#   The first full write then measured 71 s end to end - the batched
+#   writer moved 221,788 rows at ~5,100 rows/sec, well above the
+#   1,396 rows/sec seen on orbital_positions. 20 minutes is therefore
+#   ~17x headroom rather than the 3x first estimated. Left wide on
+#   purpose: a shared runner is not this machine, and the cost of an
+#   over-generous timeout is nothing while the cost of a tight one is a
+#   silent kill.
 #
 #   This number matters more than it looks. When ingest_tle.yml exceeded
 #   its timeout the process was killed outright - no exception, so no
@@ -38,18 +42,21 @@
 #   from 2026-08-26 to 08-31. A timeout that fires is invisible. The only
 #   defence is setting it from a measured runtime.
 #
-# RETENTION: 7 days.
+# RETENTION: 3 days.
 #
-#   221,788 rows a day, and unlike orbital_positions nothing self-limits:
-#   the upsert key includes window_start, so re-running a day updates in
-#   place but each new day accumulates. At an estimated ~180 bytes per row
-#   including indexes that is ~40 MB/day, which would exhaust the 500 MB
-#   tier in about a fortnight.
+#   221,788 rows a day at a measured 215 bytes each is 47.7 MB daily, and
+#   unlike orbital_positions nothing self-limits: the upsert key includes
+#   window_start, so re-running a day updates in place but each new day
+#   accumulates.
 #
-#   180 bytes is an estimate. The job logs pg_total_relation_size after
-#   each write, so after the first real run the retention window can be
-#   set from what the rows actually cost. Check the run log before
-#   trusting this number.
+#   This was 7 days when the estimate was 180 bytes/row. Measured on the
+#   first real run it was 215, and the database turned out to be at
+#   597 MB against a 500 MB tier already - tle_history holding 515 MB of
+#   it. Seven days here is 334 MB; three is 143 MB, which fits alongside
+#   a pruned tle_history at 113 MB.
+#
+#   Widen it when the budget allows. Coverage statistics want more than
+#   three days; the tier is the only reason they do not get them.
 #
 # --all-sensors, not a job matrix: the catalogue is the same 18,000 rows
 # whichever site is looking at it. One process loads it once and reuses it
