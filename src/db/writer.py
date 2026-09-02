@@ -527,6 +527,78 @@ def insert_visibility_windows(
     return written
 
 
+def prune_old_visibility_windows(days: int = 7) -> int:
+    """
+    Delete visibility_windows for analysis dates older than `days`.
+
+    WHY THIS EXISTS
+    ---------------
+    Measured on 2026-09-01 against the live 18,044-object catalogue:
+    FPS85 43,621 windows/day, GEODSS_SOC 75,084, MILLSTONE 103,083 —
+    221,788 rows every day. Unlike orbital_positions, nothing here
+    self-limits: the upsert key is (norad_id, sensor_id, window_start),
+    so re-running a day updates in place but each new day accumulates.
+    Left unpruned this table alone would exhaust the 500 MB tier in
+    roughly a fortnight.
+
+    Prunes on analysis_date rather than window_start so a whole run
+    leaves together and no day is left half-deleted.
+    """
+    with _tx() as conn:
+        result = conn.execute(
+            text("DELETE FROM visibility_windows WHERE analysis_date < :cutoff"),
+            {"cutoff": (datetime.now(timezone.utc) - timedelta(days=days)).date()},
+        )
+        deleted = result.rowcount or 0
+    logger.info("Pruned %d visibility_windows rows older than %d days.",
+                deleted, days)
+    return deleted
+
+
+def table_size_bytes(table_name: str) -> "int | None":
+    """
+    On-disk size of a table including its indexes and TOAST, or None if
+    the server will not answer.
+    """
+    try:
+        with get_engine().connect() as conn:
+            return int(conn.execute(
+                text("SELECT pg_total_relation_size(:t)"),
+                {"t": table_name},
+            ).scalar())
+    except Exception as exc:                       # not worth failing a run over
+        logger.debug("Could not read size of %s: %s", table_name, exc)
+        return None
+
+
+_DB_SIZES_SQL = """
+    SELECT c.relname, pg_total_relation_size(c.oid) AS bytes
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relkind = 'r'
+     ORDER BY bytes DESC
+"""
+
+
+def database_sizes() -> "list[tuple[str, int]]":
+    """
+    Every public table with its total on-disk size, largest first.
+
+    Retention windows on this project are a budget problem, not a policy
+    one: the tier is 500 MB and three tables compete for it. Sizing any
+    one of them from an estimate is how you find out you were wrong by
+    running out of room. This reports the whole budget so a retention
+    decision can be made against measured bytes.
+    """
+    try:
+        with get_engine().connect() as conn:
+            return [(r[0], int(r[1]))
+                    for r in conn.execute(text(_DB_SIZES_SQL)).fetchall()]
+    except Exception as exc:
+        logger.debug("Could not read table sizes: %s", exc)
+        return []
+
+
 # =====================================================
 # IMAGERY SCENES (from ingest.py)
 # =====================================================
