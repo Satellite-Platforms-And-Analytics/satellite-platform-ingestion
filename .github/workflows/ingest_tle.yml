@@ -3,11 +3,22 @@
 # Runs src/tle/fetcher.py on a schedule to keep the satellites and
 # tle_history tables current in Supabase.
 #
-# SCHEDULE: every 2 hours, matching CELESTRAK_CACHE_MAX_AGE_HOURS in
-# src/tracking/config.py -- CelesTrak itself only refreshes GP data every
-# 2 hours, so running more often just gets throttle notices back (which
-# fetcher.py / gp_json.py already handle gracefully, but there's no
-# upside to tripping them on a schedule).
+# SCHEDULE: every 2 hours at :37, matching CELESTRAK_CACHE_MAX_AGE_HOURS
+# in src/tracking/config.py -- CelesTrak itself only refreshes GP data
+# every 2 hours, so running more often just gets throttle notices back
+# (which fetcher.py already handles gracefully, but there is no upside to
+# tripping them on a schedule).
+#
+#   Why :37 and not :00. Observed 2026-08-31: this workflow was landing
+#   8-12 hours apart on a "0 */2" schedule. Scheduled jobs on shared
+#   runners are best-effort and the top of the hour is when everyone
+#   else's queue lands, so runs there are likeliest to be delayed or
+#   dropped. propagate.yml uses :17 and ingest_visibility.yml uses :43
+#   for the same reason; :37 keeps all three apart.
+#
+#   This matters more since 2026-09-01 than it did before: this job now
+#   owns tle_history retention via --prune-history. A skipped run is no
+#   longer just stale TLEs, it is a table that keeps growing.
 #
 # DEPENDENCIES: intentionally NOT `pip install -r requirements.txt`
 # (the root one). That file includes the full geospatial/imagery stack
@@ -32,8 +43,9 @@ name: Ingest TLE Data
 
 on:
   schedule:
-    # Every 2 hours, on the hour. GitHub Actions cron is UTC.
-    - cron: "0 */2 * * *"
+    # Every 2 hours at :37. GitHub Actions cron is UTC. See the note on
+    # delivery reliability at the top of this file.
+    - cron: "37 */2 * * *"
   workflow_dispatch:
     inputs:
       group:
