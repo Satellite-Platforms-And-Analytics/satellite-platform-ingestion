@@ -1,0 +1,31 @@
+# Normalise line endings.
+#
+# Every tracked file in this repo is stored with LF. Without this file,
+# Git on Windows rewrites working copies to CRLF on checkout, which has
+# two visible costs, both seen repeatedly on 2026-09-04:
+#
+#   1. `git add` prints "LF will be replaced by CRLF" for every file.
+#   2. Whole files show as modified in `git status` when nothing in them
+#      changed, which hides real edits in the noise.
+#
+# eol=lf rather than a bare `text=auto`: this repo is also checked out on
+# Linux CI runners, and no tracked file is a .bat/.cmd/.ps1 that would
+# need CRLF to work. (The ones under node_modules/ are ignored.)
+#
+# After adding this, run once:  git add --renormalize .
+* text=auto eol=lf
+
+# Binary - never convert, never diff as text.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.xlsx  binary
+*.db    binary
+*.woff  binary
+*.woff2 binary
+*.tif   binary
+*.tiff  binary
+*.jp2   binary
