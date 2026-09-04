@@ -15,6 +15,7 @@ the schema lives in a different repository.
 
 No database, no network - the schema is parsed from the .sql file.
 """
+import os
 import pathlib
 import re
 
@@ -24,15 +25,39 @@ pytest.importorskip("sqlalchemy", reason="writer.py requires sqlalchemy")
 
 from src.db import writer  # noqa: E402
 
-#: 001_core_schema.sql lives in the sibling infrastructure repo.
-SCHEMA = (pathlib.Path(__file__).resolve().parents[2]
-          / "satellite-platform-infrastructure" / "schema" / "001_core_schema.sql")
+#: 001_core_schema.sql lives in the sibling infrastructure repo. CI checks
+#: that repo out somewhere else, so allow an explicit override.
+SCHEMA = pathlib.Path(
+    os.environ.get("SCHEMA_SQL_PATH")
+    or (pathlib.Path(__file__).resolve().parents[2]
+        / "satellite-platform-infrastructure" / "schema" / "001_core_schema.sql")
+)
+
+#: Set in CI. Turns "schema not available, skip" into a hard failure.
+#:
+#: These three tests are the only guard against writer.py and the schema
+#: drifting apart, and the schema lives in a different repository - so the
+#: default is to skip when it is absent, which is right on a machine that
+#: only has one repo checked out. In CI that same skip would mean the
+#: guard silently never runs while the job reports green, which is the
+#: failure mode this project keeps hitting. Make it loud there.
+REQUIRE_SCHEMA = bool(os.environ.get("REQUIRE_SCHEMA"))
+
+
+def _require_schema() -> None:
+    if SCHEMA.exists():
+        return
+    message = (f"001_core_schema.sql not found at {SCHEMA}. Check out "
+               f"satellite-platform-infrastructure beside this repo, or set "
+               f"SCHEMA_SQL_PATH.")
+    if REQUIRE_SCHEMA:
+        pytest.fail(message + " REQUIRE_SCHEMA is set, so this guard must run.")
+    pytest.skip(message)
 
 
 def _table_columns(table: str) -> list:
     """Column names for one CREATE TABLE, in declaration order."""
-    if not SCHEMA.exists():
-        pytest.skip(f"schema not found at {SCHEMA}")
+    _require_schema()
     sql = SCHEMA.read_text(encoding="utf-8")
     m = re.search(rf"CREATE TABLE IF NOT EXISTS {table}\s*\((.*?)\n\);",
                   sql, re.S | re.I)

@@ -1,0 +1,129 @@
+# .github/workflows/ci.yml
+#
+# Runs the test suite on every push and pull request.
+#
+# WHY THIS EXISTS NOW
+# ===================
+# There were 58 tests and nothing ran them except by hand. On 2026-09-04 a
+# change shipped on 09-01 was found to have broken every TLE write for
+# three days; the suite would not have caught that one (the test agreed
+# with the bug), but it is the last time a regression should get three
+# days of runway.
+#
+# THE SKIP PROBLEM
+# ================
+# Two test files skip themselves when their dependency is absent:
+#
+#   tests/test_taxonomy_validation.py  needs the WIT package
+#   tests/test_writer_columns.py       needs 001_core_schema.sql, which
+#                                      lives in the sibling
+#                                      satellite-platform-infrastructure repo
+#
+# Skipping is right on a laptop with one repo checked out. In CI it would
+# mean the schema-drift guard silently never runs while the job reports
+# green - the exact shape of failure this project keeps hitting.
+#
+# So: CI checks out the infrastructure repo, points the test at it with
+# SCHEMA_SQL_PATH, and sets REQUIRE_SCHEMA=1 so a missing schema fails
+# instead of skipping.
+#
+# That cross-repo checkout needs a token, because GITHUB_TOKEN is scoped
+# to this repository alone. Add a fine-grained PAT with read access to
+# satellite-platform-infrastructure as the secret INFRA_REPO_TOKEN. Until
+# then the checkout is skipped, REQUIRE_SCHEMA stays unset, and the job
+# summary says in as many words that the guard did not run - visible
+# rather than silent.
+#
+# The WIT tests stay skipped in CI by design: WIT is a separate editable
+# install and its database is a local artifact.
+#
+# DEPENDENCIES: not requirements.txt. That file carries the geospatial
+# stack (rasterio, geopandas, fiona, pyproj) for src/imagery/, which needs
+# system GDAL. The tests need skyfield, sgp4, numpy, requests, sqlalchemy
+# and psycopg2 only.
+#
+# python-dotenv is deliberately NOT installed, so CI exercises the path
+# where src/env.py finds no dotenv and falls back to the environment -
+# which is how the scheduled workflows actually run.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # The `secrets` context is not available in `if:` conditions, at job or
+    # step level. Lifting it into env first is the documented way to make a
+    # step conditional on whether a secret is configured.
+    env:
+      INFRA_TOKEN: ${{ secrets.INFRA_REPO_TOKEN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check out the schema (sibling infrastructure repo)
+        id: schema
+        if: env.INFRA_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          repository: Satellite-Platforms-And-Analytics/satellite-platform-infrastructure
+          token: ${{ env.INFRA_TOKEN }}
+          path: _infrastructure
+          sparse-checkout: schema
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "skyfield>=1.45" "sgp4>=2.22" "numpy>=1.24" \
+                      "requests>=2.31" "sqlalchemy>=2.0.0" \
+                      "psycopg2-binary>=2.9.0" pytest
+
+      - name: Run tests
+        env:
+          # Empty when the checkout above was skipped, which leaves the
+          # test on its default sibling path and skipping.
+          SCHEMA_SQL_PATH: ${{ steps.schema.outcome == 'success'
+            && format('{0}/_infrastructure/schema/001_core_schema.sql', github.workspace)
+            || '' }}
+          REQUIRE_SCHEMA: ${{ steps.schema.outcome == 'success' && '1' || '' }}
+        run: pytest -q -ra
+
+      - name: Report whether the schema guard ran
+        if: always()
+        run: |
+          if [ "${{ steps.schema.outcome }}" = "success" ]; then
+            echo "✅ Schema drift guard ran against 001_core_schema.sql." \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Schema drift guard did NOT run - tests/test_writer_columns.py skipped."
+            {
+              echo "### ⚠️ Schema drift guard did not run"
+              echo
+              echo "\`tests/test_writer_columns.py\` skipped: 001_core_schema.sql"
+              echo "was not available, so writer.py was **not** checked against"
+              echo "the schema in this run."
+              echo
+              echo "Fix: add a fine-grained PAT with read access to"
+              echo "\`satellite-platform-infrastructure\` as the repository secret"
+              echo "\`INFRA_REPO_TOKEN\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
