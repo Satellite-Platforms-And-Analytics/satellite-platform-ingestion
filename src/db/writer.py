@@ -271,12 +271,34 @@ _TLE_HISTORY_COLUMNS = ["norad_id", "line1", "line2", "epoch", "source"]
 
 
 def _as_datetime(value: Any) -> Any:
-    """Parse CelesTrak's ISO EPOCH string; pass anything else through."""
+    """
+    Parse CelesTrak's ISO EPOCH string into an aware UTC datetime; pass
+    anything else through.
+
+    THE TIMEZONE IS NOT OPTIONAL HERE
+    =================================
+    CelesTrak's OMM JSON writes EPOCH as '2026-09-04T11:00:00.000000' -
+    no 'Z', no offset. `datetime.fromisoformat` therefore returns a NAIVE
+    datetime, and comparing that against the aware horizon in
+    insert_tle_history raises:
+
+        TypeError: can't compare offset-naive and offset-aware datetimes
+
+    which is what broke every TLE write from 2026-09-01 to 09-04. The
+    fetch step kept logging success; only write_db failed, so satellites
+    updated while tle_history sat frozen at 346,171 rows.
+
+    OMM epochs are UTC by definition (CCSDS 502.0-B-2), so a missing
+    designator means UTC, not unknown. Attach it rather than leaving the
+    value naive and hoping the server guesses right.
+    """
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return value                      # let the server judge it
+    if isinstance(value, datetime) and value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
     return value
 
 

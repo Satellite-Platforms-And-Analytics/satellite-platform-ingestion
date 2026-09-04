@@ -361,11 +361,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
-    try:
-        from src.env import load_env
-        load_env()
-    except ImportError:
-        pass
+    # Put the repo root on sys.path before importing src.env. Running this
+    # as `python <path>.py` rather than `python -m ...` otherwise puts only
+    # this file's directory there, `import src.env` raises ImportError, and
+    # the old `except ImportError: pass` swallowed it - so .env was never
+    # read and the run died later claiming DATABASE_URL was unset, on a
+    # machine where it was set. Observed 2026-09-04.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _root = str(_Path(__file__).resolve().parents[2])
+    if _root not in _sys.path:
+        _sys.path.insert(0, _root)
+    from src.env import bootstrap as _bootstrap
+    _bootstrap()
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -407,12 +415,53 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         log.warning("Nothing to analyse - has the TLE fetcher run?")
         return 1
 
+    # Every step from here is logged to ingestion_log.
+    #
+    # WHY THIS MATTERS MORE THAN IT LOOKS
+    # ===================================
+    # This job runs once a day, unattended. When ingest_tle.yml started
+    # timing out on 2026-08-26 the process was killed outright - no
+    # exception, so no `failed` row was written - and ten no-op runs went
+    # unnoticed for five days. What finally exposed it was that the
+    # fetcher logs a `write_db` step, so its *absence* was visible.
+    #
+    # Absence of a step is the signal, which requires there to be a step.
+    # A daily job that logs nothing can be dead for a week before anyone
+    # has reason to look.
+    #
+    # One step per sensor, so a single sensor failing is distinguishable
+    # from the whole run failing.
+    import time as _time
+
+    from src.db.writer import log_step, new_run_id
+
+    run_id = new_run_id()
+    log_step(run_id, pipeline="visibility", step="load_tles",
+             status="success", records_processed=len(tles))
+
     total_written = 0
     for sensor in sensors:
-        rows = compute_visibility(
-            sensor, tles, analysis_date,
-            start_hhmm=args.start, end_hhmm=args.end,
-            step_minutes=args.step_minutes, bin_hours=args.bin_hours)
+        sensor_started = _time.monotonic()
+        try:
+            rows = compute_visibility(
+                sensor, tles, analysis_date,
+                start_hhmm=args.start, end_hhmm=args.end,
+                step_minutes=args.step_minutes, bin_hours=args.bin_hours)
+        except Exception as exc:
+            # compute_visibility raises when the failure rate says this is
+            # a defect rather than bad element sets. Record which sensor,
+            # then let it stop the run.
+            log_step(run_id, pipeline="visibility",
+                     step=f"compute:{sensor.short_name}", status="failed",
+                     message=str(exc)[:500])
+            raise
+
+        log_step(run_id, pipeline="visibility",
+                 step=f"compute:{sensor.short_name}",
+                 status="success" if rows else "partial",
+                 message=(None if rows else "no satellites visible"),
+                 records_processed=len(rows),
+                 duration_s=_time.monotonic() - sensor_started)
 
         if not rows:
             log.warning("%s: no satellites visible in this window.",
@@ -430,11 +479,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             continue
 
         from src.db.writer import insert_visibility_windows
-        total_written += insert_visibility_windows(
-            rows, sensor_short_name=sensor.short_name,
-            analysis_date=analysis_date, bin_size_hours=args.bin_hours)
+
+        write_started = _time.monotonic()
+        try:
+            written = insert_visibility_windows(
+                rows, sensor_short_name=sensor.short_name,
+                analysis_date=analysis_date, bin_size_hours=args.bin_hours)
+        except Exception as exc:
+            log_step(run_id, pipeline="visibility",
+                     step=f"write_db:{sensor.short_name}", status="failed",
+                     message=str(exc)[:500])
+            raise
+        total_written += written
+        log_step(run_id, pipeline="visibility",
+                 step=f"write_db:{sensor.short_name}", status="success",
+                 records_processed=written,
+                 duration_s=_time.monotonic() - write_started)
 
     if args.dry_run:
+        log_step(run_id, pipeline="visibility", step="write_db",
+                 status="skipped", message="--dry-run")
         return 0
 
     log.info("Wrote %d visibility windows across %d sensor(s).",
@@ -442,7 +506,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.prune:
         from src.db.writer import prune_old_visibility_windows
-        prune_old_visibility_windows(days=args.prune_days)
+        deleted = prune_old_visibility_windows(days=args.prune_days)
+        log_step(run_id, pipeline="visibility", step="prune",
+                 status="success", records_processed=deleted)
 
     report_budget(retention_days=args.prune_days)
     return 0

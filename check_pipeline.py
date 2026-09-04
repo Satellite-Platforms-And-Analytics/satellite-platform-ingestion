@@ -48,10 +48,10 @@ def main() -> int:
 
     # Each probe runs in its own transaction: one bad column name must not
     # poison every query that follows (it did, on the first run).
-    def q(sql):
+    def q(sql, params=None):
         try:
             with engine.connect() as c:
-                return c.execute(text(sql)).fetchall()
+                return c.execute(text(sql), params or {}).fetchall()
         except Exception as exc:
             return ("ERR", str(exc).split("\n")[0][:70])
 
@@ -116,6 +116,54 @@ def main() -> int:
         for row in r:
             print(f"    {str(row[0])[:19]}  {str(row[1])[:12]:<12} {str(row[2])[:10]:<10} "
                   f"{str(row[3])[:7]:<7} {str(row[4] or ''):>7}  {str(row[5] or '')[:28]}")
+
+    # ── per-pipeline liveness ────────────────────────────────────────────────
+    #
+    # Row counts answer "is there data". They do not answer "is each job
+    # still running", which is the question that went unanswered from
+    # 2026-08-26 to 08-31 while ingest_tle.yml logged `fetch success` and
+    # wrote nothing. A job that stops is silent; the only evidence is a
+    # step that should have appeared and did not.
+    #
+    # Each pipeline is checked against its own cadence rather than one
+    # global freshness rule, with a generous multiple: scheduled workflows
+    # on shared runners are best-effort and were observed landing 8-12h
+    # apart on a 2-hourly cron.
+    EXPECTED = {                      # pipeline -> (cadence_h, stale_after_h)
+        "tle_fetch":   (2,  14),
+        "propagation": (1,  14),
+        "visibility":  (24, 48),
+    }
+
+    print("\n  Pipeline liveness")
+    print("  " + "-" * 52)
+    print(f"    {'pipeline':<14}{'last success':<21}{'age':>8}   state")
+
+    stale_pipelines = []
+    for pipeline, (cadence_h, stale_h) in EXPECTED.items():
+        r = q("SELECT max(created_at) FROM ingestion_log "
+              "WHERE pipeline = :p AND status IN ('success', 'partial')",
+              {"p": pipeline})
+        last = None if isinstance(r, tuple) or not r else r[0][0]
+
+        if last is None:
+            print(f"    {pipeline:<14}{'never':<21}{'-':>8}   NO RUNS LOGGED")
+            stale_pipelines.append(pipeline)
+            continue
+
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        age_h = (datetime.now(timezone.utc) - last).total_seconds() / 3600
+        state = "ok" if age_h <= stale_h else f"STALE (expected every {cadence_h}h)"
+        if age_h > stale_h:
+            stale_pipelines.append(pipeline)
+        print(f"    {pipeline:<14}{str(last)[:19]:<21}{age_h:>7.1f}h   {state}")
+
+    if stale_pipelines:
+        print(f"\n    {len(stale_pipelines)} pipeline(s) not reporting: "
+              f"{', '.join(stale_pipelines)}")
+        print("    Check the Actions tab - a workflow killed by its timeout")
+        print("    logs nothing at all, so absence here is the only signal.")
 
     # ── verdict ──────────────────────────────────────────────────────────────
     print("\n  " + "=" * 44)

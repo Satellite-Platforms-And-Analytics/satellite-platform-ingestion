@@ -85,6 +85,10 @@ def main(argv=None) -> int:
                     help="Keep element sets from the last N days (default 14)")
     ap.add_argument("--apply", action="store_true",
                     help="Actually make the changes (default: dry run)")
+    ap.add_argument("--purge-future", action="store_true",
+                    help="Also delete element sets epoched more than a day "
+                         "ahead. These predate the write-time guard and the "
+                         "age prune can never reach them.")
     ap.add_argument("--vacuum-only", action="store_true",
                     help="Reclaim space from an earlier prune. Use this when "
                          "the DELETE committed but the VACUUM did not - the "
@@ -123,6 +127,13 @@ def main(argv=None) -> int:
           f"({doomed*100.0/max(rows_before,1):.0f}%)")
     print(f"  drop {REDUNDANT_INDEX}: "
           f"{(idx or 0)/1e6:.1f} MB")
+
+    if args.purge_future:
+        with engine.connect() as conn:
+            n = conn.execute(text(
+                "SELECT count(*) FROM tle_history "
+                "WHERE epoch > now() + interval '1 day'")).scalar()
+        print(f"  future-dated:          {n:,} rows")
     print(f"  projected after vacuum: "
           f"~{(before - (idx or 0)) * keep / max(rows_before,1) / 1e6:,.0f} MB")
 
@@ -141,6 +152,21 @@ def main(argv=None) -> int:
             "WHERE epoch < now() - make_interval(days => :d)"),
             {"d": args.days}).rowcount
         print(f"Deleted {deleted:,} rows.")
+
+        if args.purge_future:
+            # The age prune deletes rows OLDER than the window. A row
+            # epoched in the future is never older than anything, so it
+            # survives every prune forever - and keeps check_pipeline.py
+            # printing a warning that cannot be acted on. A diagnostic
+            # that always fires is one you learn to ignore, which is worse
+            # than not having it.
+            #
+            # insert_tle_history has rejected these at write time since
+            # 2026-09-01; this clears the ones that got in before that.
+            future = conn.execute(text(
+                "DELETE FROM tle_history "
+                "WHERE epoch > now() + interval '1 day'")).rowcount
+            print(f"Deleted {future:,} future-dated row(s).")
 
     if args.skip_vacuum:
         print("\nSkipped VACUUM FULL. The space is not reclaimed yet and "

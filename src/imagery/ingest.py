@@ -40,11 +40,19 @@ from rasterio.enums import Resampling
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Paths are environment-overridable so the tree can move without code edits.
-try:
-    from src.env import load_env
-    load_env()
-except ImportError:
-    pass
+# Put the repo root on sys.path before importing src.env. Running this
+# as `python <path>.py` rather than `python -m ...` otherwise puts only
+# this file's directory there, `import src.env` raises ImportError, and
+# the old `except ImportError: pass` swallowed it - so .env was never
+# read and the run died later claiming DATABASE_URL was unset, on a
+# machine where it was set. Observed 2026-09-04.
+import sys as _sys
+from pathlib import Path as _Path
+_root = str(_Path(__file__).resolve().parents[2])
+if _root not in _sys.path:
+    _sys.path.insert(0, _root)
+from src.env import bootstrap as _bootstrap
+_bootstrap()
 
 BASE_DIR        = Path(os.environ.get("SATELLITE_DATA_DIR", r"D:\SatelliteData"))
 STAGING_DIR     = BASE_DIR / "staging"

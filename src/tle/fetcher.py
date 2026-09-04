@@ -618,11 +618,19 @@ def write_records_to_db(records: list, run_id: str) -> int:
 def main():
     # writer.get_engine() reads DATABASE_URL from os.environ, which is right
     # for GitHub Actions. Load .env so manual runs work too.
-    try:
-        from src.env import load_env
-        load_env()
-    except ImportError:
-        pass
+    # Put the repo root on sys.path before importing src.env. Running this
+    # as `python <path>.py` rather than `python -m ...` otherwise puts only
+    # this file's directory there, `import src.env` raises ImportError, and
+    # the old `except ImportError: pass` swallowed it - so .env was never
+    # read and the run died later claiming DATABASE_URL was unset, on a
+    # machine where it was set. Observed 2026-09-04.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _root = str(_Path(__file__).resolve().parents[2])
+    if _root not in _sys.path:
+        _sys.path.insert(0, _root)
+    from src.env import bootstrap as _bootstrap
+    _bootstrap()
 
     logging.basicConfig(
         level=logging.INFO,

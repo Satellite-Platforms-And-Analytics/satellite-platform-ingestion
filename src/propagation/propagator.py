@@ -45,6 +45,7 @@ import argparse
 import logging
 import math
 import sys
+import time as _time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -355,13 +356,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.print_help()
         return 0
 
+    # Every step from here is logged to ingestion_log.
+    #
+    # WHY THIS MATTERS MORE THAN IT LOOKS
+    # ===================================
+    # This job runs hourly and unattended. When ingest_tle.yml started
+    # timing out on 2026-08-26, the process was killed outright - no
+    # exception, so no `failed` row was ever written - and ten silent
+    # no-op runs went unnoticed for five days. What eventually exposed it
+    # was that the fetcher logs a `write_db` step, so its *absence* was
+    # visible. This job logged nothing at all until 2026-09-03, which
+    # meant the same failure here would have left no trace whatsoever.
+    #
+    # Absence of a step is the signal. There has to be a step to be absent.
+    from src.db.writer import log_step, new_run_id
+
+    run_id = new_run_id()
+    started = _time.monotonic()
+
     tles = load_tles(limit=args.limit)
     log.info("Loaded %d TLEs from the database.", len(tles))
     if not tles:
         log.warning("Nothing to propagate - has the TLE fetcher run?")
+        log_step(run_id, pipeline="propagation", step="load_tles",
+                 status="failed",
+                 message="no TLEs in the database - has the fetcher run?")
         return 1
 
     positions = propagate_batch(tles, max_age_days=args.max_age_days)
+    log_step(run_id, pipeline="propagation", step="propagate",
+             status="success" if positions else "failed",
+             message=(None if positions else
+                      f"no positions from {len(tles)} TLEs - all stale?"),
+             records_processed=len(positions),
+             duration_s=_time.monotonic() - started)
     if not positions:
         log.warning("No positions produced - are all stored TLEs stale?")
         return 1
@@ -372,13 +400,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             log.info("  %-8s lat=%8.3f lon=%9.3f alt=%8.1f km v=%.3f km/s",
                      row["norad_id"], row["latitude"], row["longitude"],
                      row["altitude_km"], row["velocity_km_s"])
+        log_step(run_id, pipeline="propagation", step="write_db",
+                 status="skipped", message="--dry-run")
         return 0
 
     from src.db.writer import upsert_orbital_positions, prune_old_positions
-    written = upsert_orbital_positions(positions)
+
+    write_started = _time.monotonic()
+    try:
+        written = upsert_orbital_positions(positions)
+    except Exception as exc:
+        log_step(run_id, pipeline="propagation", step="write_db",
+                 status="failed", message=str(exc))
+        raise
     log.info("Wrote %d positions.", written)
+    log_step(run_id, pipeline="propagation", step="write_db",
+             status="success", records_processed=written,
+             duration_s=_time.monotonic() - write_started)
+
     if args.prune:
-        log.info("Pruned %d rows older than 48h.", prune_old_positions(48))
+        deleted = prune_old_positions(48)
+        log.info("Pruned %d rows older than 48h.", deleted)
+        log_step(run_id, pipeline="propagation", step="prune",
+                 status="success", records_processed=deleted)
     return 0
 
 

@@ -103,11 +103,11 @@ jobs:
       - name: Run fetcher.py (dry run)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
         run: |
-          python src/tle/fetcher.py --dry-run ${{ inputs.group != '' && format('--group {0}', inputs.group) || '' }}
+          python -m src.tle.fetcher --dry-run ${{ inputs.group != '' && format('--group {0}', inputs.group) || '' }}
 
       - name: Run fetcher.py (write to database)
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          python src/tle/fetcher.py --prune-history ${{ github.event_name == 'workflow_dispatch' && inputs.group != '' && format('--group {0}', inputs.group) || '' }}
+          python -m src.tle.fetcher --prune-history ${{ github.event_name == 'workflow_dispatch' && inputs.group != '' && format('--group {0}', inputs.group) || '' }}
