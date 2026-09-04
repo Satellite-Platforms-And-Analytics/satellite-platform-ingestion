@@ -68,20 +68,20 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # 001_core_schema.sql lives here, and tests/test_writer_columns.py is
       # the only guard against writer.py drifting away from it. Public
       # repo, so the default token suffices.
       - name: Check out the schema (sibling infrastructure repo)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Satellite-Platforms-And-Analytics/satellite-platform-infrastructure
           path: _infrastructure
           sparse-checkout: schema
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: "pip"

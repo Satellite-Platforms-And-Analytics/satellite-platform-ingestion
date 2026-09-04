@@ -33,6 +33,16 @@ htmlcov/
 *.db
 *.csv
 
+# ...but not reference data that belongs in the repo.
+#
+# The blanket *.csv above is right for scene data and exports, which are
+# large and regenerable. It is wrong for the Phase 2 seed files (UCS
+# Satellite Database, UNOOSA registry) - those are small, versioned
+# reference data that the ingestion has to be reproducible against, and
+# a blanket ignore would have swallowed them silently at import time.
+!data/seed/*.csv
+!data/reference/*.csv
+
 # Logs
 *.log
 logs/
