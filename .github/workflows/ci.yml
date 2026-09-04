@@ -25,17 +25,19 @@
 #
 # So: CI checks out the infrastructure repo, points the test at it with
 # SCHEMA_SQL_PATH, and sets REQUIRE_SCHEMA=1 so a missing schema fails
-# instead of skipping.
-#
-# That cross-repo checkout needs a token, because GITHUB_TOKEN is scoped
-# to this repository alone. Add a fine-grained PAT with read access to
-# satellite-platform-infrastructure as the secret INFRA_REPO_TOKEN. Until
-# then the checkout is skipped, REQUIRE_SCHEMA stays unset, and the job
-# summary says in as many words that the guard did not run - visible
-# rather than silent.
+# instead of skipping. Both repos are public, so the default GITHUB_TOKEN
+# is enough and no extra secret is needed.
 #
 # The WIT tests stay skipped in CI by design: WIT is a separate editable
 # install and its database is a local artifact.
+#
+# COLLECTION SCOPE
+# ================
+# pytest.ini sets `testpaths = tests`. The repo root holds diagnostics
+# that talk to the live database, and one of them used to be called
+# test_writer_roundtrip.py - pytest collected it, the import failed
+# without python-dotenv, and CI exited 2 with a collection error rather
+# than a test failure. Renamed, and scoped here so it cannot recur.
 #
 # DEPENDENCIES: not requirements.txt. That file carries the geospatial
 # stack (rasterio, geopandas, fiona, pyproj) for src/imagery/, which needs
@@ -64,23 +66,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    # The `secrets` context is not available in `if:` conditions, at job or
-    # step level. Lifting it into env first is the documented way to make a
-    # step conditional on whether a secret is configured.
-    env:
-      INFRA_TOKEN: ${{ secrets.INFRA_REPO_TOKEN }}
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # 001_core_schema.sql lives here, and tests/test_writer_columns.py is
+      # the only guard against writer.py drifting away from it. Public
+      # repo, so the default token suffices.
       - name: Check out the schema (sibling infrastructure repo)
-        id: schema
-        if: env.INFRA_TOKEN != ''
         uses: actions/checkout@v4
         with:
           repository: Satellite-Platforms-And-Analytics/satellite-platform-infrastructure
-          token: ${{ env.INFRA_TOKEN }}
           path: _infrastructure
           sparse-checkout: schema
 
@@ -97,33 +93,24 @@ jobs:
                       "requests>=2.31" "sqlalchemy>=2.0.0" \
                       "psycopg2-binary>=2.9.0" pytest
 
+      - name: Verify the schema is present
+        # Fail here with a clear message rather than letting the guard
+        # quietly skip three tests inside an otherwise green run.
+        run: |
+          test -f "_infrastructure/schema/001_core_schema.sql" || {
+            echo "::error::001_core_schema.sql not checked out; the schema"\
+                 "drift guard would silently skip."
+            exit 1
+          }
+
       - name: Run tests
         env:
-          # Empty when the checkout above was skipped, which leaves the
-          # test on its default sibling path and skipping.
-          SCHEMA_SQL_PATH: ${{ steps.schema.outcome == 'success'
-            && format('{0}/_infrastructure/schema/001_core_schema.sql', github.workspace)
-            || '' }}
-          REQUIRE_SCHEMA: ${{ steps.schema.outcome == 'success' && '1' || '' }}
-        run: pytest -q -ra
+          SCHEMA_SQL_PATH: ${{ github.workspace }}/_infrastructure/schema/001_core_schema.sql
+          REQUIRE_SCHEMA: "1"
+        run: pytest -q
 
-      - name: Report whether the schema guard ran
-        if: always()
+      - name: Summary
+        if: success()
         run: |
-          if [ "${{ steps.schema.outcome }}" = "success" ]; then
-            echo "✅ Schema drift guard ran against 001_core_schema.sql." \
-              >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "::warning::Schema drift guard did NOT run - tests/test_writer_columns.py skipped."
-            {
-              echo "### ⚠️ Schema drift guard did not run"
-              echo
-              echo "\`tests/test_writer_columns.py\` skipped: 001_core_schema.sql"
-              echo "was not available, so writer.py was **not** checked against"
-              echo "the schema in this run."
-              echo
-              echo "Fix: add a fine-grained PAT with read access to"
-              echo "\`satellite-platform-infrastructure\` as the repository secret"
-              echo "\`INFRA_REPO_TOKEN\`."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "✅ Suite passed, including the schema drift guard against" \
+               "001_core_schema.sql." >> "$GITHUB_STEP_SUMMARY"
