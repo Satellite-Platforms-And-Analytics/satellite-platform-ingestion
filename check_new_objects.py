@@ -1,58 +1,53 @@
 """
-What has appeared in orbit since we last looked?
+What has appeared in orbit, and what kind of thing is it?
 
-Every row in `satellites` carries `created_at`, set by the column default
-on INSERT. `upsert_satellites` updates `last_updated` on conflict and
-never touches `created_at`, so it is already a genuine first-seen
-timestamp for every object the pipeline has ever recorded. Nothing read
-it until this script.
+Until 2026-09-05 this script had to infer "new" from `created_at` — the
+date the pipeline first saw a row. That conflates three different events:
+something new in orbit, something newly published by the source, and
+something newly *fetched* because we changed which groups we ask for. It
+misclassified 587 COSMOS 2251 fragments as a new launch, when their
+designator said 1993 and the collision that made them was in 2009.
 
-WHAT THIS ANSWERS
-=================
-Three different questions that look the same in a row count:
+SATCAT enrichment replaced the inference with the fact. `launch_date` is
+now populated for 96.8% of the catalogue, so "new" means new, and
+`object_type` says whether the new thing is a payload, a rocket body or
+debris — which is the question actually worth asking.
 
-  1. A NEW LAUNCH. Objects arrive carrying an international designator
-     whose launch has never been seen before. A rideshare deploying
-     forty payloads is forty new rows sharing one launch key.
+THE THREE SIGNALS, IN ORDER OF INTEREST
+=======================================
 
-  2. A FRAGMENTATION. Objects arrive under a launch key we ALREADY
-     hold. A 1970s rocket body does not deploy new payloads in 2026;
-     new pieces under an old launch mean something broke up. This is
-     the signal worth waking up for, and the reason clustering by
-     designator matters more than counting rows.
+  1. NEW LAUNCHES. `launch_date` inside the window. Independent of when
+     we first saw the row, so a late-catalogued object still counts and a
+     newly-fetched 1993 fragment does not.
 
-  3. CATALOGUE CHURN. An object we simply had not fetched yet -
-     re-classified, or newly published by the source. Not an event.
+  2. FRAGMENTATION. Rows that arrived recently under a launch we already
+     held, whose launch is old. A working satellite does not shed parts;
+     a 1982 rocket body producing new pieces in 2026 is an event. This is
+     the one worth waking up for, and it exits non-zero.
 
-The international designator does the work: `YYYY-NNNAAA`, where
-`YYYY-NNN` identifies the launch and the trailing letters identify the
-piece. Every fragment of an object inherits its parent's launch.
+  3. NEWLY VISIBLE. Old launches arriving in bulk. Almost always a change
+     in what we fetch — a debris group added — rather than anything
+     happening in orbit. Reported, but as configuration, not news.
 
-WHAT THIS CANNOT SEE - READ THIS BEFORE TRUSTING IT
-===================================================
-The catalogue holds ~18,000 objects. A full Space-Track GP snapshot on
-2026-08-07 held **31,651**. The gap is roughly 13,600 objects, almost
-entirely debris and rocket bodies, because ingestion fetches CelesTrak's
-`active` group plus `analyst` and three named debris events - and
-`active` means active payloads.
-
-So today this script reliably catches **new launches** and **fragments
-of the three debris events already configured**, and will miss most
-other new debris entirely. That is a source limitation, not a bug here,
-and closing it means changing where the catalogue comes from - see
-docs/API_USAGE_POLICY.md on the GP class, which is one request per hour
-for the whole catalogue.
+WHAT THIS STILL CANNOT SEE
+==========================
+SATCAT lists 35,023 objects in orbit; this catalogue holds ~18,000,
+because ingestion fetches CelesTrak's `active` group plus `analyst` and
+three named debris events. New launches are caught reliably. Most new
+debris is not, and no amount of analysis here fixes a source that was
+never asked for it.
 
 Read-only. Writes nothing.
 
     python check_new_objects.py
     python check_new_objects.py --days 30
-    python check_new_objects.py --burst 15     # fail if a launch gains 15+
+    python check_new_objects.py --burst 15
 """
 from __future__ import annotations
 
 import argparse
 import sys
+from datetime import date
 
 from sqlalchemy import text
 
@@ -64,18 +59,16 @@ except ImportError:
 
 from src.db.writer import get_engine
 
-#: Objects SATCAT lists as ORB - currently in orbit - as of the survey on
-#: 2026-09-05 (35,023 of 70,580 records; the rest are IMP/impacted, LAN
-#: and DOC). Used only to state the coverage gap honestly rather than
-#: implying completeness.
+#: Objects SATCAT lists as ORB — currently in orbit — as of 2026-09-05.
 FULL_CATALOGUE_REFERENCE = 35_023
 
-#: A launch designated more than this many years ago is not a new launch,
-#: whatever the catalogue's first-seen date says.
+#: Fallback only. `launch_date` is the real test now; this is used for
+#: rows SATCAT could not describe (uncatalogued objects have no launch
+#: date because they have no catalogue entry).
 NEW_LAUNCH_MAX_AGE_YEARS = 2
 
-#: New pieces under an ALREADY-KNOWN launch, above which something is
-#: worth a human look. A working satellite does not shed parts.
+#: New pieces under an ALREADY-KNOWN launch, above which a human should
+#: look. A working satellite does not shed parts.
 DEFAULT_BURST_THRESHOLD = 10
 
 
@@ -87,18 +80,9 @@ def launch_year(key: "str | None") -> "int | None":
     """
     The year out of a launch key, or None.
 
-    This is the correction to a real false positive. On 2026-09-01
-    ingestion began fetching CelesTrak's debris groups, and 587 COSMOS
-    2251 fragments plus 111 IRIDIUM 33 fragments arrived at once. The
-    catalogue had held none of them, so "no prior objects from this
-    launch" reported them as NEW LAUNCHES - when their designators say
-    1993-036 and 1997-051, and the collision that produced them was in
-    2009.
-
-    "First seen by us" conflates three different things: new to the
-    world, newly published by the source, and newly *fetched* because we
-    changed which groups we ask for. The designator year separates the
-    first from the other two at no cost.
+    Kept as the fallback for rows with no `launch_date` — uncatalogued
+    analyst tracks, which SATCAT cannot describe. For everything else
+    `launch_date` is authoritative and this is not consulted.
     """
     if not key or len(key) < 4 or not key[:4].isdigit():
         return None
@@ -124,6 +108,57 @@ def launch_key(intl_designator: "str | None") -> "str | None":
     return key
 
 
+#: A launch keeps deploying and being catalogued for a while after it
+#: happens. Inside this, new payloads are deployment, not an event.
+DEPLOYMENT_WINDOW_DAYS = 120
+
+#: Above this share of new pieces arriving on ONE day, an old launch's
+#: sudden growth is our ingestion changing rather than an orbital event.
+#: A real break-up is tracked and catalogued over days to weeks; 587
+#: fragments of a 2009 collision appearing in one afternoon is a debris
+#: group being added to the fetch list.
+SAME_DAY_INGESTION_FRACTION = 0.9
+
+
+def classify_arrival(launch_age_days, types, count, same_day_fraction):
+    """
+    Why did objects from this launch show up now?
+
+    Returns 'deployment', 'fragmentation', 'ingestion_change' or
+    'newly_visible'.
+
+    Written against real output. A first version keyed only on "did we
+    hold this launch before", and reported HULIANWANG DIGUI payloads from
+    a launch 32 days old as fragmentation — because the launch fell just
+    outside the reporting window while its payloads arrived just inside
+    it. One window was answering two different questions: how recently
+    did this launch happen, and how recently did we see the rows.
+
+    `types` is the set of object_type values among the new rows. That is
+    the discriminator the catalogue could not supply before 2026-09-05:
+    payloads appearing is deployment, debris appearing is an event.
+    """
+    debris = bool({"DEBRIS", "ROCKET BODY"} & set(types))
+
+    if launch_age_days is not None and \
+            launch_age_days <= DEPLOYMENT_WINDOW_DAYS and not debris:
+        return "deployment"
+
+    if debris:
+        if count >= 20 and same_day_fraction >= SAME_DAY_INGESTION_FRACTION:
+            return "ingestion_change"
+        return "fragmentation"
+
+    return "newly_visible"
+
+
+def _type_mix(rows, idx: int) -> str:
+    """'12 PAYLOAD, 3 DEBRIS' — what kind of material this actually is."""
+    from collections import Counter
+    counts = Counter((r[idx] or "unknown") for r in rows)
+    return ", ".join(f"{n} {t}" for t, n in counts.most_common())
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -139,146 +174,164 @@ def main(argv=None) -> int:
 
     with get_engine().connect() as conn:
         total = q(conn, "SELECT count(*) FROM satellites")[0][0]
-        print(f"\nCatalogue: {total:,} objects")
+        dated = q(conn,
+                  "SELECT count(launch_date) FROM satellites")[0][0]
+        print(f"\nCatalogue: {total:,} objects, {dated:,} with a launch date "
+              f"({dated*100.0/max(total,1):.1f}%)")
         gap = FULL_CATALOGUE_REFERENCE - total
         if gap > 0:
-            print(f"  A full GP snapshot held {FULL_CATALOGUE_REFERENCE:,}, "
-                  f"so roughly {gap:,} objects - mostly debris and rocket "
-                  f"bodies -")
-            print(f"  are not in this catalogue and cannot be detected here.")
+            print(f"  SATCAT lists {FULL_CATALOGUE_REFERENCE:,} objects in "
+                  f"orbit, so roughly {gap:,} — mostly")
+            print(f"  debris and rocket bodies — are outside this catalogue "
+                  f"and invisible here.")
 
-        # -- Is the earliest day a backfill? -------------------------
-        # The initial load gives thousands of rows one identical
-        # created_at. Counting that as "new objects" would be nonsense,
-        # so name it instead.
-        first_day, first_n = q(conn, """
-            SELECT created_at::date, count(*)
+        # ── 1. New launches, by launch date ───────────────────────────
+        launches = q(conn, """
+            SELECT norad_id, name, intl_designator, object_type,
+                   launch_date, launch_site, created_at::date
               FROM satellites
-             GROUP BY 1 ORDER BY 1 ASC LIMIT 1
-        """)[0]
-        print(f"\n  First-seen dates begin {first_day} with {first_n:,} "
-              f"objects")
-        if first_n > 1000:
-            print(f"  (that is the initial backfill, not a launch)")
-
-        # -- Arrivals per day ----------------------------------------
-        rows = q(conn, """
-            SELECT created_at::date AS d, count(*)
-              FROM satellites
-             WHERE created_at >= now() - make_interval(days => :d)
-             GROUP BY 1 ORDER BY 1 DESC
+             WHERE launch_date >= (now() - make_interval(days => :d))::date
+             ORDER BY launch_date DESC, norad_id
         """, d=args.days)
-        print(f"\nFirst seen in the last {args.days} days:")
-        if not rows:
-            print("  nothing - no new objects recorded in this window")
-        for day, n in rows:
-            print(f"  {str(day):<12}{n:>6}")
 
-        recent = q(conn, """
-            SELECT norad_id, name, intl_designator, created_at::date
+        print(f"\n{'='*66}\nNEW LAUNCHES — launched in the last {args.days} "
+              f"days\n{'='*66}")
+        if not launches:
+            print("  none")
+        else:
+            grouped: dict = {}
+            for r in launches:
+                grouped.setdefault(launch_key(r[2]) or "(no designator)",
+                                   []).append(r)
+            lp = "launch" if len(grouped) == 1 else "launches"
+            print(f"{len(launches):,} objects across {len(grouped)} {lp}")
+            print(f"  {_type_mix(launches, 3)}\n")
+            for key, members in sorted(grouped.items(),
+                                       key=lambda kv: -len(kv[1])):
+                d = members[0][4]
+                site = members[0][5] or "-"
+                print(f"  {key}   {len(members):>4} object(s)   "
+                      f"launched {d}   {site}")
+                print(f"      {_type_mix(members, 3)}")
+                for norad, name, _, _, _, _, seen in members[:3]:
+                    print(f"      {norad:>7}  {(name or '')[:38]:<38}"
+                          f"first seen {seen}")
+                if len(members) > 3:
+                    print(f"      ... and {len(members)-3} more")
+
+            # How long between launch and the catalogue noticing? A
+            # widening gap means the pipeline is falling behind, and it
+            # is only measurable now that both dates exist.
+            lag = q(conn, """
+                SELECT min(created_at::date - launch_date),
+                       round(avg(created_at::date - launch_date)),
+                       max(created_at::date - launch_date)
+                  FROM satellites
+                 WHERE launch_date >= (now() - make_interval(days => :d))::date
+                   AND created_at::date >= launch_date
+            """, d=args.days)[0]
+            if lag and lag[1] is not None:
+                print(f"\n  Launch to first seen: {lag[0]}–{lag[2]} days "
+                      f"(mean {lag[1]:.0f})")
+
+        # ── 2 & 3. Rows that arrived recently but are not new ─────────
+        arrivals = q(conn, """
+            SELECT norad_id, name, intl_designator, object_type,
+                   launch_date, created_at::date
               FROM satellites
              WHERE created_at >= now() - make_interval(days => :d)
+               AND (launch_date IS NULL
+                    OR launch_date < (now() - make_interval(days => :d))::date)
              ORDER BY created_at DESC
         """, d=args.days)
-        if not recent:
-            print("\nNothing new in this window.")
-            return 0
 
-        # -- Cluster by launch ---------------------------------------
-        # 'YYYY-NNNAAA' -> 'YYYY-NNN' is the launch; the rest is the
-        # piece. Anything that does not parse is grouped separately
-        # rather than silently dropped.
-        launches: dict = {}
-        unparsed = []
-        for norad, name, intl, day in recent:
-            key = launch_key(intl)
-            if key:
-                launches.setdefault(key, []).append((norad, name, day))
+        held_before, fragments, unattributed = {}, [], []
+        for r in arrivals:
+            key = launch_key(r[2])
+            if key is None:
+                unattributed.append(r)
             else:
-                unparsed.append((norad, name, intl, day))
+                held_before.setdefault(key, []).append(r)
 
-        print(f"\n{len(recent):,} new objects across {len(launches)} launch(es)")
-
-        this_year = q(conn, "SELECT extract(year FROM now())::int")[0][0]
-        new_launches, fragmentations, newly_visible = [], [], []
-        for key, members in launches.items():
-            # How many objects from this launch did we already hold
-            # before this window?
+        from collections import Counter
+        buckets = {"deployment": [], "fragmentation": [],
+                   "ingestion_change": [], "newly_visible": []}
+        for key, members in held_before.items():
             prior = q(conn, """
                 SELECT count(*) FROM satellites
                  WHERE intl_designator LIKE :p
                    AND created_at < now() - make_interval(days => :d)
             """, p=key + "%", d=args.days)[0][0]
-            yr = launch_year(key)
-            recent_launch = (yr is not None and
-                             yr >= this_year - NEW_LAUNCH_MAX_AGE_YEARS)
-            if prior == 0 and recent_launch:
-                new_launches.append((key, members, prior))
-            elif prior == 0:
-                # An old launch we simply did not hold before. Almost
-                # always a change in what WE fetch, not an orbital event.
-                newly_visible.append((key, members, prior))
-            else:
-                fragmentations.append((key, members, prior))
+            ld = members[0][4]
+            age = (date.today() - ld).days if ld else None
+            seen = Counter(r[5] for r in members)
+            frac = seen.most_common(1)[0][1] / len(members)
+            kind = classify_arrival(age, {r[3] for r in members},
+                                    len(members), frac)
+            buckets[kind].append((key, members, prior, age, frac))
 
-        if new_launches:
-            print(f"\nNEW LAUNCHES ({len(new_launches)}):")
-            for key, members, _ in sorted(new_launches,
-                                          key=lambda x: -len(x[1])):
-                print(f"  {key}   {len(members):>4} object(s)"
-                      f"   first seen {members[0][2]}")
-                for norad, name, _ in members[:4]:
-                    print(f"      {norad:>7}  {name}")
-                if len(members) > 4:
-                    print(f"      ... and {len(members)-4} more")
+        print(f"\n{'='*66}\nOTHER ARRIVALS\n{'='*66}")
+        if not any(buckets.values()):
+            print("  none")
 
-        if newly_visible:
-            total_nv = sum(len(m) for _, m, _ in newly_visible)
-            print(f"\nOLD LAUNCHES, NEWLY VISIBLE TO US "
-                  f"({len(newly_visible)} launches, {total_nv:,} objects):")
-            print("  These carry designators from previous years, so they "
-                  "are not new")
-            print("  launches. Objects arriving in bulk under old "
-                  "designators normally")
-            print("  mean the ingestion configuration changed - a debris "
-                  "group added,")
-            print("  say - rather than anything happening in orbit.")
-            for key, members, _ in sorted(newly_visible,
-                                          key=lambda x: -len(x[1])):
-                print(f"  {key}   {len(members):>4} object(s)"
-                      f"   first seen {members[0][2]}")
-                for norad, name, _ in members[:2]:
-                    print(f"      {norad:>7}  {name}")
+        def show(kind, title, note):
+            rows_ = buckets[kind]
+            if not rows_:
+                return
+            n = sum(len(m) for _, m, _, _, _ in rows_)
+            lp = "launch" if len(rows_) == 1 else "launches"
+            op = "object" if n == 1 else "objects"
+            print(f"\n{title} ({len(rows_)} {lp}, {n:,} {op})")
+            for line in note:
+                print(f"  {line}")
+            print()
+            for key, members, prior, age, frac in sorted(
+                    rows_, key=lambda x: -len(x[1]))[:10]:
+                ld = members[0][4]
+                age_s = f"{age:,}d ago" if age is not None else "date unknown"
+                print(f"  {key}   +{len(members):<4} (had {prior:,})   "
+                      f"launched {ld or '?'} ({age_s})")
+                print(f"      {_type_mix(members, 3)}")
 
-        if fragmentations:
-            print(f"\nNEW PIECES UNDER EXISTING LAUNCHES "
-                  f"({len(fragmentations)}):")
-            print("  A launch we already hold gaining new pieces is either "
-                  "a deployment")
-            print("  from a recent launch, or a fragmentation of something "
-                  "older.")
-            for key, members, prior in sorted(fragmentations,
-                                              key=lambda x: -len(x[1])):
-                flag = ""
-                if len(members) >= args.burst:
-                    flag = f"   <-- {len(members)} new pieces"
-                    problems.append(
-                        f"{key}: {len(members)} new pieces under a launch "
-                        f"already holding {prior} - possible fragmentation")
-                print(f"  {key}   +{len(members):<4} (had {prior:,})"
-                      f"   {members[0][2]}{flag}")
-                for norad, name, _ in members[:3]:
-                    print(f"      {norad:>7}  {name}")
+        show("fragmentation", "FRAGMENTATION", [
+            "New debris or rocket-body pieces under a launch we already "
+            "hold.",
+            "A working satellite does not shed parts."])
+        for key, members, prior, age, frac in buckets["fragmentation"]:
+            if len(members) >= args.burst:
+                problems.append(
+                    f"{key} (launched {members[0][4]}): {len(members)} new "
+                    f"pieces under a launch already holding {prior}")
 
-        if unparsed:
-            print(f"\nNo usable international designator ({len(unparsed)}):")
-            for norad, name, intl, day in unparsed[:10]:
-                print(f"  {norad:>7}  {(name or '')[:34]:<34}"
-                      f"{intl or '(none)'}  {day}")
-            print("  These cannot be attributed to a launch. Analyst objects "
-                  "and")
-            print("  uncatalogued tracks look like this and are worth "
-                  "watching.")
+        show("deployment", "DEPLOYMENT", [
+            f"Payloads from launches under {DEPLOYMENT_WINDOW_DAYS} days "
+            f"old, still being catalogued.",
+            "Normal — a launch keeps producing rows for weeks."])
+
+        show("ingestion_change", "INGESTION CHANGE", [
+            "Old launches whose pieces nearly all arrived on ONE day.",
+            "A real break-up is catalogued over days to weeks; this "
+            "shape means",
+            "a debris group was added to what we fetch."])
+
+        show("newly_visible", "NEWLY VISIBLE", [
+            "Old launches arriving without the signature of either an "
+            "event or",
+            "a bulk configuration change."])
+
+        # ── Uncatalogued ─────────────────────────────────────────────
+        if unattributed:
+            print(f"\n{'='*66}\nUNCATALOGUED ({len(unattributed)})\n{'='*66}")
+            print("  No international designator, so SATCAT has nothing to "
+                  "say about them")
+            print("  and they carry no launch date. These are objects being "
+                  "tracked but")
+            print("  not yet catalogued — the leading edge of new material "
+                  "in orbit.\n")
+            for norad, name, _, _, _, seen in unattributed[:10]:
+                print(f"  {norad:>7}  {(name or 'UNKNOWN')[:34]:<34}{seen}")
+            if len(unattributed) > 10:
+                print(f"  ... and {len(unattributed)-10} more")
 
     print()
     if problems:
@@ -286,7 +339,7 @@ def main(argv=None) -> int:
         for p in problems:
             print(f"  - {p}")
         return 1
-    print("OK - nothing above the fragmentation threshold.")
+    print("OK — nothing above the fragmentation threshold.")
     return 0
 
 

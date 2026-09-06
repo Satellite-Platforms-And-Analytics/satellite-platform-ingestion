@@ -100,3 +100,139 @@ def test_the_window_tolerates_a_late_catalogued_launch():
     # in the previous year must still count as new.
     this_year = 2026
     assert launch_year("2025-276") >= this_year - NEW_LAUNCH_MAX_AGE_YEARS
+
+
+# ── Object-type mix ───────────────────────────────────────────────────
+#
+# "What kind of material is this" is the question the user actually
+# asked. object_type only became available on 2026-09-05, when SATCAT
+# enrichment filled it for 96.8% of the catalogue.
+
+from check_new_objects import _type_mix
+
+
+def test_type_mix_counts_and_orders_by_frequency():
+    rows = [(1, "a", None, "DEBRIS"), (2, "b", None, "PAYLOAD"),
+            (3, "c", None, "DEBRIS"), (4, "d", None, "DEBRIS")]
+    assert _type_mix(rows, 3) == "3 DEBRIS, 1 PAYLOAD"
+
+
+def test_type_mix_names_missing_types_rather_than_dropping_them():
+    # A row with no object_type is one SATCAT could not describe. It must
+    # still be counted, or the totals stop matching the row count.
+    rows = [(1, "a", None, None), (2, "b", None, "PAYLOAD")]
+    out = _type_mix(rows, 3)
+    assert "unknown" in out and "1 PAYLOAD" in out
+
+
+def test_type_mix_totals_match_the_row_count():
+    rows = [(i, "x", None, t) for i, t in
+            enumerate(["PAYLOAD", "DEBRIS", None, "ROCKET BODY", "DEBRIS"])]
+    total = sum(int(p.split()[0]) for p in _type_mix(rows, 3).split(", "))
+    assert total == len(rows)
+
+
+def test_new_launches_are_selected_by_launch_date_not_first_seen():
+    # The substantive guard: the "NEW LAUNCHES" query must filter on
+    # launch_date. Filtering on created_at is what reported 587 COSMOS
+    # 2251 fragments from 1993 as a new launch.
+    import inspect
+    import check_new_objects as m
+    src = inspect.getsource(m.main)
+    launches_query = src.split("NEW LAUNCHES")[0].split(
+        "launches = q(conn")[-1]
+    assert "WHERE launch_date >=" in launches_query, (
+        "new launches must be selected by launch_date")
+    assert "created_at >=" not in launches_query, (
+        "created_at is when WE first saw a row, not when the object "
+        "came into existence")
+
+
+def test_the_designator_year_rule_survives_only_as_a_fallback():
+    # Uncatalogued objects have no launch_date because they have no
+    # catalogue entry, so launch_year still has a job — but it must not
+    # be the primary test again.
+    import check_new_objects as m
+    assert m.NEW_LAUNCH_MAX_AGE_YEARS == 2
+    assert m.launch_year("1993-036") == 1993
+    assert "fallback" in (m.launch_year.__doc__ or "").lower()
+
+
+# ── Why did these objects show up now? ────────────────────────────────
+#
+# Written against real output from 2026-09-05. The first classifier keyed
+# only on "did we hold this launch before" and reported HULIANWANG DIGUI
+# payloads — from a launch 32 days old — as fragmentation, because the
+# launch fell outside the 30-day reporting window while its payloads
+# arrived inside it. One window was answering two different questions.
+
+from check_new_objects import (
+    classify_arrival, DEPLOYMENT_WINDOW_DAYS, SAME_DAY_INGESTION_FRACTION)
+
+
+def test_recent_payloads_are_deployment_not_fragmentation():
+    # HULIANWANG DIGUI-185/186: launched 2026-08-04, 7 payloads arriving
+    # 2026-08-08. A launch keeps being catalogued for weeks.
+    assert classify_arrival(32, {"PAYLOAD"}, 7, 1.0) == "deployment"
+
+
+def test_a_payload_just_outside_the_report_window_is_still_deployment():
+    # The exact failure: 32 days old, reported with --days 30.
+    for age in (31, 45, DEPLOYMENT_WINDOW_DAYS):
+        assert classify_arrival(age, {"PAYLOAD"}, 2, 1.0) == "deployment"
+
+
+def test_debris_under_an_old_launch_is_fragmentation():
+    # 1982-092 — COSMOS 1408, the 2021 ASAT test, still shedding.
+    assert classify_arrival(16_060, {"DEBRIS"}, 3, 1.0) == "fragmentation"
+
+
+def test_rocket_body_pieces_count_as_fragmentation_too():
+    assert classify_arrival(9_000, {"ROCKET BODY"}, 4, 0.5) == "fragmentation"
+
+
+def test_debris_on_a_recent_launch_is_still_fragmentation():
+    # A new launch shedding debris is an event, not deployment. The
+    # deployment shortcut must not swallow it.
+    assert classify_arrival(10, {"PAYLOAD", "DEBRIS"}, 5, 1.0) \
+        == "fragmentation"
+
+
+def test_a_bulk_same_day_debris_dump_is_an_ingestion_change():
+    # 1993-036: 587 COSMOS 2251 fragments of a 2009 collision, all
+    # appearing in one afternoon because a debris group was added.
+    assert classify_arrival(12_000, {"DEBRIS"}, 587, 1.0) \
+        == "ingestion_change"
+
+
+def test_a_real_breakup_spread_over_days_stays_fragmentation():
+    # Same size, but catalogued over time — which is what a genuine
+    # break-up looks like. This is the distinction that keeps the alert
+    # meaningful.
+    assert classify_arrival(12_000, {"DEBRIS"}, 587, 0.4) == "fragmentation"
+
+
+def test_the_same_day_threshold_is_not_off_by_one():
+    just_under = SAME_DAY_INGESTION_FRACTION - 0.01
+    assert classify_arrival(12_000, {"DEBRIS"}, 50, just_under) \
+        == "fragmentation"
+    assert classify_arrival(12_000, {"DEBRIS"}, 50,
+                            SAME_DAY_INGESTION_FRACTION) == "ingestion_change"
+
+
+def test_a_small_same_day_debris_group_is_not_dismissed_as_ingestion():
+    # Three pieces arriving together is an event, not a config change.
+    # Only bulk arrivals get the benefit of that doubt.
+    assert classify_arrival(16_060, {"DEBRIS"}, 3, 1.0) == "fragmentation"
+
+
+def test_old_payloads_are_newly_visible_not_an_event():
+    # 2018-038 TESS: a payload from 2018 we simply had not held.
+    assert classify_arrival(3_000, {"PAYLOAD"}, 1, 1.0) == "newly_visible"
+
+
+def test_an_unknown_launch_date_does_not_become_deployment():
+    # 1987-060: two analyst objects with a designator but no launch date.
+    # Guessing "recent" for a missing date would hide them.
+    assert classify_arrival(None, {"PAYLOAD"}, 2, 1.0) == "newly_visible"
+    assert classify_arrival(None, {"DEBRIS"}, 2, 1.0) == "fragmentation"
