@@ -71,6 +71,17 @@ NEW_LAUNCH_MAX_AGE_YEARS = 2
 #: look. A working satellite does not shed parts.
 DEFAULT_BURST_THRESHOLD = 10
 
+#: Mean days from launch to first appearing here. Measured at 6 on
+#: 2026-09-05 with a range of 0-8. Well above that means ingestion is
+#: falling behind, which no single run would reveal.
+LATENCY_ALERT_MEAN_DAYS = 14
+
+#: Rise in uncatalogued objects since the last recorded count that is
+#: worth a look. These are tracked-but-not-yet-catalogued tracks, so a
+#: jump can be the earliest visible sign of a break-up - before the
+#: fragments are given designators and become findable any other way.
+UNCATALOGUED_JUMP = 50
+
 
 def q(conn, sql, **params):
     return conn.execute(text(sql), params).fetchall()
@@ -165,12 +176,17 @@ def main(argv=None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=14,
                     help="How far back to look (default 14)")
+    ap.add_argument("--record", action="store_true",
+                    help="Write findings to catalog_events. Safe to re-run: "
+                         "keyed so a re-detection updates rather than "
+                         "duplicates.")
     ap.add_argument("--burst", type=int, default=DEFAULT_BURST_THRESHOLD,
                     help="Fragments under one known launch before this "
                          "exits non-zero (default %(default)s)")
     args = ap.parse_args(argv)
 
     problems: list[str] = []
+    events: list[dict] = []
 
     with get_engine().connect() as conn:
         total = q(conn, "SELECT count(*) FROM satellites")[0][0]
@@ -218,6 +234,19 @@ def main(argv=None) -> int:
                           f"first seen {seen}")
                 if len(members) > 3:
                     print(f"      ... and {len(members)-3} more")
+                seen_dates = [r[6] for r in members]
+                events.append({
+                    "event_type": "new_launch",
+                    "event_key": f"{key}:{min(seen_dates)}",
+                    "launch_key": key if key != "(no designator)" else None,
+                    "launch_date": d,
+                    "object_count": len(members),
+                    "object_types": _type_mix(members, 3),
+                    "norad_ids": [r[0] for r in members],
+                    "first_seen": min(seen_dates),
+                    "notable": True,
+                    "details": {"launch_site": site},
+                })
 
             # How long between launch and the catalogue noticing? A
             # widening gap means the pipeline is falling behind, and it
@@ -293,6 +322,27 @@ def main(argv=None) -> int:
                       f"launched {ld or '?'} ({age_s})")
                 print(f"      {_type_mix(members, 3)}")
 
+        #: Fragmentation and ingestion changes both matter to the
+        #: dashboard; only the first should interrupt anyone.
+        NOTABLE_KINDS = {"fragmentation"}
+        for kind, rows_ in buckets.items():
+            for key, members, prior, age, frac in rows_:
+                seen_dates = [r[5] for r in members]
+                events.append({
+                    "event_type": kind,
+                    "event_key": f"{key}:{min(seen_dates)}",
+                    "launch_key": key,
+                    "launch_date": members[0][4],
+                    "object_count": len(members),
+                    "object_types": _type_mix(members, 3),
+                    "norad_ids": [r[0] for r in members],
+                    "first_seen": min(seen_dates),
+                    "notable": kind in NOTABLE_KINDS,
+                    "details": {"held_before": prior,
+                                "launch_age_days": age,
+                                "same_day_fraction": round(frac, 3)},
+                })
+
         show("fragmentation", "FRAGMENTATION", [
             "New debris or rocket-body pieces under a launch we already "
             "hold.",
@@ -332,6 +382,97 @@ def main(argv=None) -> int:
                 print(f"  {norad:>7}  {(name or 'UNKNOWN')[:34]:<34}{seen}")
             if len(unattributed) > 10:
                 print(f"  ... and {len(unattributed)-10} more")
+
+        # ── Health metrics ───────────────────────────────────────────
+        today = date.today()
+
+        lag_now = q(conn, """
+            SELECT round(avg(created_at::date - launch_date), 1),
+                   count(*)
+              FROM satellites
+             WHERE launch_date >= (now() - make_interval(days => :d))::date
+               AND created_at::date >= launch_date
+        """, d=args.days)[0]
+        if lag_now and lag_now[0] is not None:
+            mean_lag = float(lag_now[0])
+            late = mean_lag > LATENCY_ALERT_MEAN_DAYS
+            events.append({
+                "event_type": "latency_regression",
+                "event_key": f"latency:{today}",
+                "object_count": lag_now[1],
+                "notable": late,
+                "details": {"mean_lag_days": mean_lag,
+                            "threshold_days": LATENCY_ALERT_MEAN_DAYS,
+                            "window_days": args.days},
+            })
+            if late:
+                problems.append(
+                    f"launch-to-first-seen averaging {mean_lag:.1f} days "
+                    f"over the last {args.days} (threshold "
+                    f"{LATENCY_ALERT_MEAN_DAYS}) — ingestion is falling "
+                    f"behind")
+
+        uncat_now = q(conn, """
+            SELECT count(*) FROM satellites
+             WHERE intl_designator IS NULL OR intl_designator = ''
+        """)[0][0]
+        # Compare against the last count we recorded, not a constant —
+        # the interesting quantity is the change, and only the table
+        # remembers what it was.
+        prev = q(conn, """
+            SELECT object_count FROM catalog_events
+             WHERE event_type = 'uncatalogued_growth'
+               AND event_key <> :k
+             ORDER BY detected_at DESC LIMIT 1
+        """, k=f"uncatalogued:{today}")
+        previous = prev[0][0] if prev else None
+        jump = (uncat_now - previous) if previous is not None else 0
+        grew = jump >= UNCATALOGUED_JUMP
+        events.append({
+            "event_type": "uncatalogued_growth",
+            "event_key": f"uncatalogued:{today}",
+            "object_count": uncat_now,
+            "notable": grew,
+            "details": {"previous": previous, "change": jump,
+                        "threshold": UNCATALOGUED_JUMP},
+        })
+        if grew:
+            problems.append(
+                f"uncatalogued objects rose by {jump:,} to {uncat_now:,} "
+                f"since the last check — possible break-up before the "
+                f"fragments are designated")
+
+        print(f"\n{'='*66}\nHEALTH\n{'='*66}")
+        if lag_now and lag_now[0] is not None:
+            print(f"  launch to first seen : {float(lag_now[0]):.1f} days "
+                  f"mean (alert above {LATENCY_ALERT_MEAN_DAYS})")
+        print(f"  uncatalogued objects : {uncat_now:,}", end="")
+        if previous is not None:
+            print(f"   ({jump:+,} since {previous:,})")
+        else:
+            print("   (no prior count recorded)")
+
+    # ── Persist ─────────────────────────────────────────────────────
+    if args.record and events:
+        import time
+        import uuid
+        from src.db.writer import log_step, upsert_catalog_events
+        run_id = str(uuid.uuid4())
+        started = time.monotonic()
+        try:
+            n = upsert_catalog_events(events)
+        except Exception as exc:
+            log_step(run_id, pipeline="catalog_events", step="write_db",
+                     status="failed", message=str(exc))
+            raise
+        log_step(run_id, pipeline="catalog_events", step="write_db",
+                 status="success", records_processed=n,
+                 duration_s=time.monotonic() - started)
+        notable = sum(1 for e in events if e["notable"])
+        print(f"\nRecorded {n} event(s) to catalog_events "
+              f"({notable} notable).")
+    elif args.record:
+        print("\nNothing to record.")
 
     print()
     if problems:

@@ -1,0 +1,167 @@
+# .github/workflows/monitor_catalog.yml
+#
+# Watches the catalogue for new launches, fragmentation, and two health
+# metrics, records what it finds, and opens an issue only when there is
+# something that was not there yesterday.
+#
+# SCHEDULE: daily, 07:19 UTC.
+#
+#   After ingest_visibility.yml at 06:43 and well after the 2-hourly TLE
+#   fetch, so a morning run reads a catalogue that already has the night's
+#   arrivals in it. :19 rather than :00 for the reason the other workflows
+#   give - scheduled jobs at the top of the hour compete with everyone
+#   else's and are likelier to be delayed or dropped.
+#
+# WHY TWO STEPS AND NOT ONE
+#
+#   check_new_objects.py --record writes findings over a rolling 30-day
+#   window, so it re-detects the same nineteen launches every morning for
+#   a month. report_events.py then reads back only what was FIRST seen in
+#   the last day.
+#
+#   That split is the whole design. An issue built on "everything notable
+#   in the window" would repeat itself daily until people stopped reading
+#   it, which is the same failure as a swallowed error: something is
+#   reported, and nobody learns anything from it. This is silent on a
+#   quiet day and therefore worth reading on a loud one.
+#
+#   catalog_events.detected_at is set on INSERT and deliberately excluded
+#   from the upsert's DO UPDATE list. A re-detection moves updated_at and
+#   leaves detected_at alone. That single column is what makes "new"
+#   answerable.
+#
+# WHY IT DOES NOT JUST FAIL THE JOB
+#
+#   A red X reads as "the job is broken", not "something happened in
+#   orbit". The two want different reactions - one is a bug to fix, the
+#   other is a fact to record - and a monitor that cannot tell you which
+#   has failed at its only task. So: an issue for the finding, and a
+#   failed job only when the script itself errors.
+#
+# TIMEOUT: 10 minutes. The detection queries run in seconds against
+#   indexed columns; this is headroom for a slow runner, not an estimate.
+#   Set deliberately, because a killed process writes no failure row - see
+#   the note in ingest_visibility.yml.
+#
+# DEPENDENCIES: not requirements.txt. That file carries the geospatial
+#   stack for src/imagery/, which needs system GDAL. This job only reads
+#   the database.
+#
+# REQUIRED SECRET:
+#   DATABASE_URL -- Supabase Postgres, POOLED connection string (6543).
+
+name: Monitor Catalogue
+
+on:
+  schedule:
+    - cron: "19 7 * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Detection window in days (default 30)"
+        required: false
+        default: "30"
+      since_hours:
+        description: "Report events first seen within this many hours"
+        required: false
+        default: "24"
+      no_issue:
+        description: "Detect and record, but do not open an issue"
+        required: false
+        default: false
+        type: boolean
+
+# One writer at a time: a manual run overlapping the schedule would have
+# two processes upserting the same (event_type, event_key) rows.
+concurrency:
+  group: monitor-catalog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "sqlalchemy>=2.0.0" "psycopg2-binary>=2.9.0" \
+                      "requests>=2.31" "numpy>=1.24"
+
+      # Exits non-zero on a fragmentation above threshold. That is a
+      # finding, not a failure, so the exit code is captured rather than
+      # allowed to end the job - the issue is how it gets reported.
+      - name: Detect and record
+        id: detect
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set +e
+          python check_new_objects.py \
+            --days "${{ inputs.days || '30' }}" --record | tee detect.log
+          echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Build the digest
+        id: digest
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python report_events.py \
+            --since-hours "${{ inputs.since_hours || '24' }}" \
+            --out digest.md
+          if [ -s digest.md ]; then
+            echo "has_content=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_content=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open an issue
+        if: >
+          steps.digest.outputs.has_content == 'true' &&
+          inputs.no_issue != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          {
+            cat digest.md
+            echo
+            echo "---"
+            echo
+            echo "Recorded in \`catalog_events\`. Detection window: "
+            echo "${{ inputs.days || '30' }} days."
+            echo
+            echo "[Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          } > issue.md
+
+          TITLE="Catalogue events — $DATE"
+          if [ "${{ steps.detect.outputs.status }}" != "0" ]; then
+            TITLE="⚠️ $TITLE"
+          fi
+          gh issue create --title "$TITLE" --body-file issue.md \
+            --label catalogue-events || \
+          gh issue create --title "$TITLE" --body-file issue.md
+
+      # Only a genuine error fails the job. Exit 1 from the detector means
+      # it found something and the issue above says what; exit 2 or more
+      # means the script itself broke.
+      - name: Fail on a real error
+        if: steps.detect.outputs.status != '0' && steps.detect.outputs.status != '1'
+        run: |
+          echo "check_new_objects.py exited ${{ steps.detect.outputs.status }}"
+          exit 1
