@@ -192,7 +192,8 @@ _SATELLITE_VALUES_TEMPLATE = (
 def _bulk_upsert(sql_with_values: str,
                  rows: "list[tuple]",
                  template: "str | None" = None,
-                 page_size: int = 1000) -> int:
+                 page_size: int = 1000,
+                 count_affected: bool = False) -> int:
     """
     Execute a multi-row INSERT via psycopg2's execute_values.
 
@@ -202,6 +203,23 @@ def _bulk_upsert(sql_with_values: str,
 
     `template` overrides the per-row tuple, for cases where a column is
     computed server-side (e.g. "(%s, %s, now())").
+
+    `count_affected` changes what is RETURNED. By default this reports the
+    number of rows submitted, which is fine for INSERT ... ON CONFLICT DO
+    UPDATE, where every row either inserts or updates and the two numbers
+    agree.
+
+    They do NOT agree for a statement that can match nothing. The
+    attribution writer sends 70,580 SATCAT records at a catalogue of
+    ~18,000; rows for objects we do not track match no satellite and
+    update nothing. Reporting the submitted count there would claim
+    "enriched 70,580" and compute a coverage gap of zero — the absence
+    made to look like success, which is this project's most expensive
+    recurring bug.
+
+    execute_values pages internally and leaves cur.rowcount reflecting
+    only the final page, so getting a true total means paging here and
+    summing.
     """
     if not rows:
         return 0
@@ -220,16 +238,24 @@ def _bulk_upsert(sql_with_values: str,
 
     raw = get_engine().raw_connection()
     try:
+        affected = 0
         with raw.cursor() as cur:
-            execute_values(cur, sql_with_values, rows,
-                           template=template, page_size=page_size)
+            if count_affected:
+                for i in range(0, len(rows), page_size):
+                    page = rows[i:i + page_size]
+                    execute_values(cur, sql_with_values, page,
+                                   template=template, page_size=len(page))
+                    affected += max(cur.rowcount, 0)
+            else:
+                execute_values(cur, sql_with_values, rows,
+                               template=template, page_size=page_size)
         raw.commit()
     except Exception:
         raw.rollback()
         raise
     finally:
         raw.close()
-    return len(rows)
+    return affected if count_affected else len(rows)
 
 
 def upsert_satellites(satellites: Iterable[Mapping[str, Any]]) -> int:
@@ -259,6 +285,113 @@ def upsert_satellites(satellites: Iterable[Mapping[str, Any]]) -> int:
     written = _bulk_upsert(_UPSERT_SATELLITE_SQL, tuples,
                            template=_SATELLITE_VALUES_TEMPLATE)
     logger.info("Upserted %d satellite rows.", written)
+    return written
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Catalogue enrichment (Phase 2)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# A SECOND writer for `satellites`, deliberately separate from
+# upsert_satellites. The 2-hourly CelesTrak fetch owns the orbital columns;
+# enrichment owns attribution and provenance. They meet at COALESCE, so
+# neither erases the other's work.
+#
+# This one UPDATES ONLY. It will not create a satellite.
+#
+# That is the important constraint. SATCAT holds 70,580 records against
+# this catalogue's ~18,000, and 35,542 of them are decayed objects that
+# re-entered years ago. An INSERT here would quadruple the table on a
+# 500 MB tier as a side effect of an enrichment pass — a scope decision
+# disguised as a data-quality one. Expanding the catalogue is a separate,
+# deliberate operation; enriching what we already track is this one.
+#
+# Each value carries an explicit cast. execute_values sends VALUES tuples
+# untyped, and Postgres will not silently coerce text into DATE, REAL or
+# TIMESTAMPTZ inside an UPDATE ... FROM — it errors, which is better than
+# guessing, but only if the casts are here to begin with.
+
+_ATTRIBUTION_COLUMNS = [
+    ("norad_id",          "int"),
+    ("object_type",       "text"),
+    ("status",            "text"),
+    ("owner_code",        "text"),
+    ("country_code",      "text"),
+    ("rcs_size",          "text"),
+    ("launch_date",       "date"),
+    ("launch_site",       "text"),
+    ("period_min",        "real"),
+    ("inclination_deg",   "real"),
+    ("apogee_km",         "real"),
+    ("perigee_km",        "real"),
+    ("data_source",       "text"),
+    ("match_method",      "text"),
+    ("source_confidence", "real"),
+    ("matched_at",        "timestamptz"),
+]
+
+#: Descriptive columns use COALESCE so a source that omits a field cannot
+#: blank one another source already filled.
+_ATTRIBUTION_DESCRIPTIVE = [
+    c for c, _ in _ATTRIBUTION_COLUMNS
+    if c not in ("norad_id", "data_source", "match_method",
+                 "source_confidence", "matched_at")
+]
+
+#: Provenance is assigned outright. It describes THIS pass, so preserving
+#: an older value would misreport where the row's attribution came from.
+_ATTRIBUTION_PROVENANCE = ["data_source", "match_method",
+                           "source_confidence", "matched_at"]
+
+_UPDATE_ATTRIBUTION_SQL = f"""
+    UPDATE satellites AS s SET
+        {", ".join(f"{c} = COALESCE(v.{c}, s.{c})"
+                   for c in _ATTRIBUTION_DESCRIPTIVE)},
+        {", ".join(f"{c} = v.{c}" for c in _ATTRIBUTION_PROVENANCE)},
+        last_updated = now()
+    FROM (VALUES %s) AS v({", ".join(c for c, _ in _ATTRIBUTION_COLUMNS)})
+    WHERE s.norad_id = v.norad_id
+"""
+
+_ATTRIBUTION_VALUES_TEMPLATE = (
+    "(" + ", ".join(f"%s::{t}" for _, t in _ATTRIBUTION_COLUMNS) + ")"
+)
+
+
+def upsert_satellite_attribution(
+        rows: Iterable[Mapping[str, Any]]) -> int:
+    """
+    Write catalogue attribution onto satellites that already exist.
+
+    Returns the number of rows actually updated — which is NOT the number
+    passed in. A SATCAT record for an object this catalogue does not track
+    matches nothing and updates nothing, and the difference between the
+    two numbers is the coverage gap, worth reporting rather than hiding.
+
+    Every row must carry provenance. A descriptive value with no
+    data_source cannot be re-examined or rolled back with its source,
+    which is the failure 004_catalog_provenance.sql exists to prevent, so
+    it is rejected here rather than written and detected later by
+    check_catalog.py.
+    """
+    prepared = []
+    for r in rows:
+        if r.get("norad_id") is None:
+            raise ValueError(f"attribution row missing norad_id: {r}")
+        if not r.get("data_source"):
+            raise ValueError(
+                f"attribution row for norad {r['norad_id']} has no "
+                f"data_source. Every enriched row must say where it came "
+                f"from — see 004_catalog_provenance.sql.")
+        prepared.append(tuple(r.get(c) for c, _ in _ATTRIBUTION_COLUMNS))
+
+    if not prepared:
+        return 0
+
+    written = _bulk_upsert(_UPDATE_ATTRIBUTION_SQL, prepared,
+                           template=_ATTRIBUTION_VALUES_TEMPLATE,
+                           count_affected=True)
+    logger.info("Enriched %d satellite rows.", written)
     return written
 
 

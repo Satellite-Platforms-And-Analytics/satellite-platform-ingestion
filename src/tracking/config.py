@@ -263,6 +263,34 @@ API_REQUEST_LOG_DB = os.path.join(TLE_DATA_DIR, "api_request_log.sqlite3")
 SATCAT_CACHE_DB = os.path.join(TLE_DATA_DIR, "satcat_cache.sqlite3")
 SATCAT_CACHE_MAX_AGE_HOURS = 24
 
+# ---------------------------------------------------------------------
+# Added 2026-09-05 so this copy and the Satellite Visibility Tool name
+# the SAME files.
+# ---------------------------------------------------------------------
+#
+# These three were defined only in the tool's config, under BASE_DIR
+# rather than TLE_DATA_DIR. One Space-Track account was therefore being
+# guarded by two ledgers that could not see each other - the failure
+# api_request_log.py's docstring exists to describe. Declaring them here
+# too means either copy resolves to the same path.
+#
+# GP_HISTORY_CACHE_DB is NOT the same store as TLE_HISTORY_CACHE_DB,
+# despite the similar names:
+#
+#   TLE_HISTORY_CACHE_DB - tle_history_cache.py. Tables `tle_elements`
+#       and `coverage`; derived orbital elements, bulk-seeded from the
+#       yearly archives.
+#   GP_HISTORY_CACHE_DB  - tle_cache.py. Table `tle_history`, one BLOB
+#       per (norad, lookback_years). The guard for gp_history's "once
+#       per object per lifetime" rule.
+#
+# The tool had these two crossed until 2026-09-05: its
+# TLE_HISTORY_CACHE_DB pointed at a file containing tle_cache.py's
+# schema, and its GP_HISTORY_CACHE_DB at a file that did not exist.
+GP_HISTORY_CACHE_DB  = os.path.join(TLE_DATA_DIR, "gp_history_cache.sqlite3")
+CATALOG_CACHE_DB     = os.path.join(TLE_DATA_DIR, "catalog_cache.sqlite3")
+SPACETRACK_BUDGET_DB = os.path.join(TLE_DATA_DIR, "spacetrack_budget.sqlite3")
+
 OUTPUT_FILE = os.path.join(BASE_DIR, "output", "visible_satellites.xlsx")
 
 # Active satellites from CelesTrak

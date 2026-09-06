@@ -55,6 +55,47 @@ def _require_schema() -> None:
     pytest.skip(message)
 
 
+def _migration_files() -> list:
+    """
+    Every .sql in the schema directory, in filename order.
+
+    The guard used to read 001_core_schema.sql alone. That was correct
+    while it was the only file, and becomes wrong the moment a migration
+    adds a column: writer.py would legitimately write `users`, the guard
+    would look only at the original CREATE TABLE, and it would fail
+    claiming the schema has no such column. A guard that fires on correct
+    code is worse than no guard, because it gets disabled.
+    """
+    return sorted(SCHEMA.parent.glob("*.sql"))
+
+
+_ADD_COLUMN = re.compile(
+    r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)",
+    re.I)
+
+
+def _added_columns(table: str) -> list:
+    """
+    Columns introduced by ALTER TABLE ... ADD COLUMN in later migrations,
+    in the order the migrations apply them.
+    """
+    found = []
+    for path in _migration_files():
+        sql = path.read_text(encoding="utf-8")
+        # Strip comments first: 004 documents the columns it is *not*
+        # adding, and those must not be mistaken for real ones.
+        sql = "\n".join(l for l in sql.splitlines()
+                         if not l.strip().startswith("--"))
+        for stmt in re.split(r";", sql):
+            m = re.search(rf"ALTER\s+TABLE\s+{table}\b", stmt, re.I)
+            if not m:
+                continue
+            for col in _ADD_COLUMN.findall(stmt):
+                if col not in found:
+                    found.append(col)
+    return found
+
+
 def _table_columns(table: str) -> list:
     """Column names for one CREATE TABLE, in declaration order."""
     _require_schema()
@@ -73,30 +114,71 @@ def _table_columns(table: str) -> list:
         name = line.split()[0].strip(",")
         if name:
             cols.append(name)
+
+    # Columns added by later migrations count too.
+    cols.extend(c for c in _added_columns(table) if c not in cols)
     return cols
 
 
-@pytest.mark.parametrize("writer_cols,table,generated", [
-    (writer._SATELLITE_COLUMNS, "satellites", {"id", "last_updated", "created_at"}),
-    (writer._VISIBILITY_COLUMNS, "visibility_windows", {"id", "created_at"}),
-    (writer._TLE_HISTORY_COLUMNS, "tle_history", {"id", "fetched_at"}),
+#: Columns owned by a writer other than the one under test.
+#:
+#: Until 2026-09-04 this test assumed one writer owned each table, which
+#: was true. Migration 004 breaks that for `satellites`: the 2-hourly TLE
+#: fetch owns the orbital columns, and a Phase 2 enrichment pass will own
+#: attribution provenance. Listing them here is not a way to silence the
+#: guard - the columns are still required to exist in the schema, and a
+#: typo in this set fails the test. It records the ownership split so an
+#: orphaned column cannot hide in it.
+OWNED_BY_ENRICHMENT = {
+    # 004_catalog_provenance.sql
+    "users", "data_source", "match_method", "source_confidence",
+    "matched_at",
+    # 005_owner_code.sql - SATCAT's OWNER verbatim. Deliberately not in
+    # _SATELLITE_COLUMNS: the 2-hourly CelesTrak fetch has no owner data
+    # to write, and adding it there would mean passing NULL twelve times
+    # a day into a column enrichment owns.
+    "owner_code",
+}
+
+
+@pytest.mark.parametrize("writer_cols,table,generated,owned_elsewhere", [
+    (writer._SATELLITE_COLUMNS, "satellites",
+     {"id", "last_updated", "created_at"}, OWNED_BY_ENRICHMENT),
+    (writer._VISIBILITY_COLUMNS, "visibility_windows",
+     {"id", "created_at"}, set()),
+    (writer._TLE_HISTORY_COLUMNS, "tle_history",
+     {"id", "fetched_at"}, set()),
 ], ids=["satellites", "visibility_windows", "tle_history"])
-def test_writer_columns_match_schema(writer_cols, table, generated):
+def test_writer_columns_match_schema(writer_cols, table, generated,
+                                     owned_elsewhere):
     """
     Every column the writer names must exist in the table, and every column
-    the table requires must be written or generated. `generated` lists the
-    ones the database fills itself.
+    in the table must be written by this writer, filled by the database, or
+    explicitly owned by another writer.
     """
     schema_cols = _table_columns(table)
     unknown = [c for c in writer_cols if c not in schema_cols]
     assert not unknown, f"{table}: writer names columns not in the schema: {unknown}"
 
+    # A column named as owned elsewhere must still exist - otherwise this
+    # set becomes a place for typos and deleted columns to hide.
+    missing = sorted(c for c in owned_elsewhere if c not in schema_cols)
+    assert not missing, (
+        f"{table}: OWNED_BY_ENRICHMENT names columns no schema file "
+        f"declares: {missing}. This test reads schema/*.sql, so it means "
+        f"the migration file is missing from the repo or the name is "
+        f"misspelt - not that the migration has not been applied to the "
+        f"database, which this test cannot see."
+    )
+
     unwritten = [c for c in schema_cols
-                 if c not in writer_cols and c not in generated]
+                 if c not in writer_cols
+                 and c not in generated
+                 and c not in owned_elsewhere]
     assert not unwritten, (
-        f"{table}: schema has columns the writer never sets: {unwritten}. "
-        "Add them to the writer's column list, or to `generated` if the "
-        "database fills them."
+        f"{table}: schema has columns nothing writes: {unwritten}. Add them "
+        "to the writer's column list, to `generated` if the database fills "
+        "them, or to OWNED_BY_ENRICHMENT if another writer owns them."
     )
 
 
