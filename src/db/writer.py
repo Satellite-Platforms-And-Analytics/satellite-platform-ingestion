@@ -395,6 +395,86 @@ def upsert_satellite_attribution(
     return written
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Catalogue events
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# What check_new_objects.py noticed, made durable. See
+# 006_catalog_events.sql for why this is a table rather than an alert.
+#
+# The upsert keys on (event_type, event_key) because the monitor sweeps a
+# rolling window daily and re-detects the same launches for weeks. Without
+# that, a month of runs turns one launch into thirty rows and every
+# dashboard count is wrong.
+
+#: Objects listed per event. object_count carries the true total; this is
+#: a sample so an ingestion change covering 587 fragments does not write a
+#: 587-element array on every one of thirty daily re-detections.
+MAX_NORAD_SAMPLE = 200
+
+_CATALOG_EVENT_COLUMNS = [
+    ("event_type",   "text"),
+    ("event_key",    "text"),
+    ("launch_key",   "text"),
+    ("launch_date",  "date"),
+    ("object_count", "int"),
+    ("object_types", "text"),
+    ("norad_ids",    "integer[]"),
+    ("first_seen",   "date"),
+    ("notable",      "boolean"),
+    ("details",      "jsonb"),
+]
+
+_UPSERT_CATALOG_EVENT_SQL = f"""
+    INSERT INTO catalog_events (
+        {", ".join(c for c, _ in _CATALOG_EVENT_COLUMNS)}
+    ) VALUES %s
+    ON CONFLICT (event_type, event_key) DO UPDATE SET
+        {", ".join(f"{c} = EXCLUDED.{c}"
+                   for c, _ in _CATALOG_EVENT_COLUMNS
+                   if c not in ("event_type", "event_key"))},
+        updated_at = now()
+"""
+
+_CATALOG_EVENT_VALUES_TEMPLATE = (
+    "(" + ", ".join(f"%s::{t}" for _, t in _CATALOG_EVENT_COLUMNS) + ")"
+)
+
+
+def upsert_catalog_events(events: Iterable[Mapping[str, Any]]) -> int:
+    """
+    Record what the catalogue noticed. Re-running is safe.
+
+    `details` may be a dict; it is serialised here so callers do not each
+    have to remember to. `norad_ids` is truncated to MAX_NORAD_SAMPLE —
+    `object_count` is the number that means something.
+    """
+    import json
+
+    rows = []
+    for e in events:
+        if not e.get("event_type") or not e.get("event_key"):
+            raise ValueError(
+                f"catalog event needs event_type and event_key: {e}")
+        row = dict(e)
+        ids = row.get("norad_ids") or []
+        row["norad_ids"] = [int(n) for n in list(ids)[:MAX_NORAD_SAMPLE]]
+        row["object_count"] = int(row.get("object_count") or 0)
+        row["notable"] = bool(row.get("notable", False))
+        details = row.get("details")
+        row["details"] = (json.dumps(details)
+                          if isinstance(details, (dict, list)) else details)
+        rows.append(tuple(row.get(c) for c, _ in _CATALOG_EVENT_COLUMNS))
+
+    if not rows:
+        return 0
+
+    written = _bulk_upsert(_UPSERT_CATALOG_EVENT_SQL, rows,
+                           template=_CATALOG_EVENT_VALUES_TEMPLATE)
+    logger.info("Recorded %d catalogue event(s).", written)
+    return written
+
+
 _INSERT_TLE_HISTORY_SQL = """
     INSERT INTO tle_history (norad_id, line1, line2, epoch, source)
     VALUES %s

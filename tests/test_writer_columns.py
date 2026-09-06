@@ -97,12 +97,25 @@ def _added_columns(table: str) -> list:
 
 
 def _table_columns(table: str) -> list:
-    """Column names for one CREATE TABLE, in declaration order."""
+    """
+    Column names for one CREATE TABLE, in declaration order.
+
+    Searches every migration, not just 001. The guard already knew that
+    a later migration can ADD COLUMN to an existing table; it did not
+    know a later migration can CREATE a table. 006_catalog_events.sql
+    made that difference visible — the same blind spot one level up, and
+    the same failure mode: a guard firing on correct code, which is worse
+    than no guard because it gets disabled.
+    """
     _require_schema()
-    sql = SCHEMA.read_text(encoding="utf-8")
-    m = re.search(rf"CREATE TABLE IF NOT EXISTS {table}\s*\((.*?)\n\);",
-                  sql, re.S | re.I)
-    assert m, f"{table} not found in {SCHEMA.name}"
+    m = None
+    for path in _migration_files():
+        m = re.search(rf"CREATE TABLE IF NOT EXISTS {table}\s*\((.*?)\n\);",
+                      path.read_text(encoding="utf-8"), re.S | re.I)
+        if m:
+            break
+    assert m, (f"{table} is not created by any migration in "
+               f"{SCHEMA.parent}")
 
     cols = []
     for line in m.group(1).splitlines():
@@ -148,7 +161,12 @@ OWNED_BY_ENRICHMENT = {
      {"id", "created_at"}, set()),
     (writer._TLE_HISTORY_COLUMNS, "tle_history",
      {"id", "fetched_at"}, set()),
-], ids=["satellites", "visibility_windows", "tle_history"])
+    # 006_catalog_events.sql. detected_at/updated_at are database
+    # defaults; everything else this writer names.
+    ([c for c, _ in writer._CATALOG_EVENT_COLUMNS], "catalog_events",
+     {"id", "detected_at", "updated_at"}, set()),
+], ids=["satellites", "visibility_windows", "tle_history",
+        "catalog_events"])
 def test_writer_columns_match_schema(writer_cols, table, generated,
                                      owned_elsewhere):
     """

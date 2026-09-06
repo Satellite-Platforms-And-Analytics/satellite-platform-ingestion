@@ -112,9 +112,13 @@ def main(argv=None) -> int:
             for _, _, _, count, _, _, note, details, _ in items:
                 d = details or {}
                 if key == "latency_regression":
+                    # object_count here is OBJECTS, not launches. "245
+                    # launches in 30 days" would read as roughly eight a
+                    # day, which is off by an order of magnitude.
                     lines.append(
-                        f"- mean **{d.get('mean_lag_days')} days** over "
-                        f"{count:,} launches "
+                        f"- mean **{d.get('mean_lag_days')} days** across "
+                        f"{count:,} objects from launches in the last "
+                        f"{d.get('window_days')} days "
                         f"(alert above {d.get('threshold_days')})"
                         + ("  ⚠️" if note else ""))
                 else:
