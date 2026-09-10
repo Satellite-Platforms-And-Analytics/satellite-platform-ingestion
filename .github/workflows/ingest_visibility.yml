@@ -63,12 +63,19 @@
 # for all three sensors; a matrix would be three checkouts, three
 # installs, and three identical 18,000-row queries.
 #
-# DEPENDENCIES: not `pip install -r requirements.txt`, for the same reason
-# as the other two workflows - that file carries the geospatial stack
-# (rasterio, geopandas, fiona, pyproj) for src/imagery/, which needs
-# system GDAL and can fail the build. This job needs skyfield, because it
-# must match the interactive tool's numbers exactly, plus requests and
-# numpy which src/tracking/satellite_utils.py imports at module scope.
+# DEPENDENCIES: `pip install -r requirements.txt`, the core runtime list.
+# This workflow used to install a hand-written package list because the
+# root requirements.txt carried the geospatial stack. As of 2026-09-10 it
+# does not: an audit found rasterio's companions (geopandas, fiona,
+# pyproj, shapely) were declared but imported by nothing, and the one
+# real GDAL dependency now lives in requirements-imagery.txt. The core
+# file installs fast, needs no system libraries, and is verified against
+# actual imports by tests/test_requirements.py - so six hand-maintained
+# lists that could drift are now one that cannot.
+#
+# This job needs skyfield, because it must match the interactive tool's
+# numbers exactly, plus numpy which src/tracking/satellite_utils.py
+# imports at module scope. Both are in the core file.
 #
 # REQUIRED SECRET:
 #   DATABASE_URL -- Supabase Postgres, POOLED connection string (port 6543).
@@ -128,9 +135,7 @@ jobs:
       - name: Install visibility dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "skyfield>=1.45" "sgp4>=2.22" "numpy>=1.24" \
-                      "requests>=2.31" "sqlalchemy>=2.0.0" \
-                      "psycopg2-binary>=2.9.0"
+          pip install -r requirements.txt
 
       - name: Compute and write visibility windows
         env:

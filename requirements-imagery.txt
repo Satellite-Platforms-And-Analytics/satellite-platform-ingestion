@@ -1,0 +1,13 @@
+# src/imagery/ - scene ingestion.
+#
+#   pip install -r requirements.txt -r requirements-imagery.txt
+#
+# Kept out of the core file because rasterio needs system GDAL, which is
+# the slow and failure-prone half of this repository's dependency tree. No
+# scheduled workflow installs this today: imagery_scenes is empty and the
+# GIS work is deferred. It is listed so that when that work starts, the
+# dependency is already declared rather than rediscovered.
+#
+# Only rasterio is here. geopandas, shapely, pyproj and fiona were in the
+# root requirements.txt for months and nothing ever imported them.
+rasterio>=1.4.0

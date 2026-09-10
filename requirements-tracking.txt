@@ -1,0 +1,17 @@
+# src/tracking/ - the interactive Satellite Visibility Tool.
+#
+#   pip install -r requirements.txt -r requirements-tracking.txt
+#
+# This is the forked tool that runs from PyCharm on the workstation, not
+# from a scheduled workflow. Its reporting and progress-bar stack is real
+# and none of it was declared anywhere before 2026-09-10 - the tool worked
+# because the workstation environment happened to have these installed.
+#
+# src/visibility/compute.py reaches into this package for exactly one
+# function, and that function needs only numpy, which is in the core file.
+# So nothing here is required by any scheduled job.
+pandas>=2.0.0
+openpyxl>=3.1.0
+tqdm>=4.66.0
+psutil>=5.9.0
+spacetrack>=1.3.0

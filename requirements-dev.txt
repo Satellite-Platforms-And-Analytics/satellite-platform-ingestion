@@ -1,0 +1,9 @@
+# Tests and linting.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# pytest-asyncio was in the root requirements.txt and there is not one
+# async test in this repository. Removed rather than carried.
+pytest>=8.0.0
+ruff>=0.4.0
+mypy>=1.10.0

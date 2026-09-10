@@ -1,41 +1,40 @@
-# Satellite Platform — Ingestion Pipeline
+# Satellite Platform - Ingestion Pipeline: core runtime
 # Python 3.11+
-# Install: pip install -r requirements.txt
+#
+#   pip install -r requirements.txt
+#
+# This file is what every scheduled workflow installs. Keep it to what the
+# pipeline entry points under src/ actually import, and nothing else - the
+# whole point of the split is that this list installs fast and cannot fail
+# on a native dependency.
+#
+# Optional groups, installed only where they are needed:
+#
+#   requirements-imagery.txt    src/imagery/  (GDAL-backed, slow, no
+#                               scheduled job runs it yet)
+#   requirements-tracking.txt   src/tracking/ (the interactive Satellite
+#                               Visibility Tool's reporting stack)
+#   requirements-dev.txt        tests and linting
+#
+# Audited against actual imports on 2026-09-10. The previous version of
+# this file listed aiohttp, geopandas, shapely, pyproj, fiona, dask,
+# xarray, alembic, apscheduler and pytest-asyncio - ten packages that no
+# module in this repository imports. Four of them were cited by name in
+# five workflow headers as the reason those workflows could not use this
+# file. They were removed rather than pinned. tests/test_requirements.py
+# now fails if this drifts again in either direction.
 
-# ── HTTP / API ─────────────────────────────────────────────────────────────────
-requests>=2.34.0
-aiohttp>=3.9.0
+# HTTP
+requests>=2.31.0
 
-# ── Orbit propagation ─────────────────────────────────────────────────────────
+# Orbit propagation and geometry
 sgp4>=2.22
-skyfield>=1.48
+skyfield>=1.45
+numpy>=1.24
 
-# ── Geospatial / imagery ──────────────────────────────────────────────────────
-rasterio>=1.4.0
-geopandas>=1.0.0
-shapely>=2.0.0
-pyproj>=3.6.0
-fiona>=1.9.0
-
-# ── Data processing ───────────────────────────────────────────────────────────
-numpy>=2.0.0
-pandas>=2.0.0
-dask>=2024.0.0
-xarray>=2024.0.0
-
-# ── Database ──────────────────────────────────────────────────────────────────
-psycopg2-binary>=2.9.0
+# Database
 sqlalchemy>=2.0.0
-alembic>=1.13.0
+psycopg2-binary>=2.9.0
 
-# ── Scheduling ────────────────────────────────────────────────────────────────
-apscheduler>=3.10.0
-
-# ── Environment ───────────────────────────────────────────────────────────────
+# Environment
 python-dotenv>=1.0.0
-
-# ── Dev / testing ─────────────────────────────────────────────────────────────
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
-ruff>=0.4.0
-mypy>=1.10.0
