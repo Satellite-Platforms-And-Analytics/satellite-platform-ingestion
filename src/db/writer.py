@@ -594,9 +594,33 @@ def insert_tle_history(records: Iterable[Mapping[str, Any]]) -> int:
     if not rows:
         return 0
     tuples = [tuple(r.get(c) for c in _TLE_HISTORY_COLUMNS) for r in rows]
-    _bulk_upsert(_INSERT_TLE_HISTORY_SQL, tuples)
-    logger.info("Inserted up to %d tle_history rows (duplicates skipped).", len(rows))
-    return len(rows)
+
+    # count_affected, because this is ON CONFLICT DO NOTHING: rows that
+    # collide with the (norad_id, epoch) unique constraint are discarded
+    # by the database and were previously counted as written anyway.
+    #
+    # The old log line said "Inserted up to N rows (duplicates skipped)"
+    # and returned N — it knew it did not know, and reported the
+    # optimistic figure regardless.
+    #
+    # The blast radius was smaller than it looks, and worth stating
+    # accurately: fetcher.py discarded this return value, and the
+    # `records_processed` it logs is the *satellites* upsert count. So
+    # the inflated figure only ever reached stdout, and the 2026-09-01
+    # size investigation was unaffected — check_tle_history.py counts the
+    # table directly.
+    #
+    # What was actually missing is that archival volume was never
+    # recorded at all. fetcher.py now logs this count as its own step.
+    written = _bulk_upsert(_INSERT_TLE_HISTORY_SQL, tuples,
+                           count_affected=True)
+    already = len(rows) - written
+    if already:
+        logger.info("Inserted %d tle_history row(s); %d already held.",
+                    written, already)
+    else:
+        logger.info("Inserted %d tle_history row(s).", written)
+    return written
 
 
 # =====================================================

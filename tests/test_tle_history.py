@@ -186,3 +186,59 @@ def test_duplicates_within_one_batch_collapse(monkeypatch):
 
     assert insert_tle_history(records) == 1
     assert captured["rows"][0][3].microsecond == 376672   # full precision
+
+
+# ── The count must be rows the database actually kept ─────────────────
+#
+# insert_tle_history uses ON CONFLICT (norad_id, epoch) DO NOTHING, so
+# rows colliding with an element set already held are discarded by the
+# database. It used to return len(rows) regardless — its own log line
+# said "Inserted up to N rows (duplicates skipped)", which is an
+# admission that the number was an upper bound.
+#
+# That matters now in a way it did not before: fetcher.py logs this count
+# to ingestion_log as write_tle_history. A count that reports submissions
+# would show a healthy, growing archive on a run where nothing new was
+# stored at all.
+
+def test_the_count_is_rows_inserted_not_rows_submitted(monkeypatch):
+    from src.db import writer
+
+    seen = {}
+
+    def fake(sql, rows, template=None, page_size=1000, count_affected=False):
+        seen["count_affected"] = count_affected
+        seen["submitted"] = len(rows)
+        # The database kept one of the three; the rest already existed.
+        return 1 if count_affected else len(rows)
+
+    monkeypatch.setattr(writer, "_bulk_upsert", fake)
+
+    now = datetime.now(timezone.utc)
+    records = [
+        {"norad_id": 25544 + i, "line1": "1 ...", "line2": "2 ...",
+         "epoch": (now - timedelta(hours=i)).replace(tzinfo=None).isoformat(),
+         "source": "celestrak"}
+        for i in range(3)
+    ]
+
+    result = writer.insert_tle_history(records)
+    assert seen["submitted"] == 3
+    assert seen["count_affected"] is True, (
+        "without this the writer reports what it sent, not what the "
+        "database kept")
+    assert result == 1, (
+        "three element sets submitted, one actually archived — the "
+        "return value must be the second number")
+
+
+def test_the_fetcher_logs_archival_volume_as_its_own_step():
+    # Previously the return value was discarded and the only logged
+    # figure was the satellites upsert count, so nothing recorded whether
+    # the archive was still growing.
+    import inspect
+    from src.tle import fetcher
+    src = inspect.getsource(fetcher)
+    assert 'step="write_tle_history"' in src
+    assert "archived = insert_tle_history(" in src, (
+        "the return value must be captured, not discarded")

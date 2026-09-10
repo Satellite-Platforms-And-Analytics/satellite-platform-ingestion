@@ -602,13 +602,22 @@ def write_records_to_db(records: list, run_id: str) -> int:
         for r in records
         if r.tle_line1 and r.tle_line2
     ]
-    if tle_history_rows:
-        insert_tle_history(tle_history_rows)
+    # Archival volume was previously invisible: the return value was
+    # discarded and the step below logs the *satellites* count. With
+    # ON CONFLICT DO NOTHING most of what is submitted is usually already
+    # held, so "rows submitted" and "rows archived" are different numbers
+    # and only the second says whether the archive is still growing.
+    archived = insert_tle_history(tle_history_rows) if tle_history_rows else 0
 
     log_step(
         run_id, pipeline="tle_fetch", step="write_db", status="success",
         records_processed=n, source="celestrak",
         duration_s=_time.monotonic() - _write_started,
+    )
+    log_step(
+        run_id, pipeline="tle_fetch", step="write_tle_history",
+        status="success", records_processed=archived, source="celestrak",
+        message=f"{len(tle_history_rows)} submitted, {archived} new",
     )
     return n
 
