@@ -172,3 +172,58 @@ def test_the_reporter_asks_about_detected_at_not_updated_at():
         "querying updated_at would return every re-detected event every "
         "day, which is the thing this design exists to avoid")
     assert "updated_at >=" not in src
+
+
+# ── The monitor must be able to say nothing ───────────────────────────
+#
+# Found by letting it run. Issues opened on 2026-09-06, 07, 08 and 09;
+# the 09-09 one read "2 new catalogue event(s) in the last 24h, 0
+# notable" and contained only the two health metrics.
+#
+# Those metrics are written every run under an event_key of
+# '<metric>:<date>', so their detected_at is always today and they are
+# always "new". The digest was therefore never empty and the workflow's
+# `[ -s digest.md ]` gate always passed. A daily issue that usually says
+# nothing is alert fatigue, which is a swallowed error with extra steps.
+
+from report_events import is_newsworthy, ROUTINE_TYPES
+
+
+def ev(event_type, notable=False):
+    # Positional shape must match the reporter's SELECT: event_type is
+    # index 0 and notable is index 6.
+    return (event_type, None, None, 0, None, None, notable, None, None)
+
+
+def test_the_two_daily_metrics_alone_are_not_newsworthy():
+    assert is_newsworthy([ev("latency_regression"),
+                          ev("uncatalogued_growth")]) is False
+
+
+def test_a_metric_that_crossed_its_threshold_is_newsworthy():
+    # notable is what a threshold breach sets, and it must still speak.
+    assert is_newsworthy([ev("latency_regression", notable=True),
+                          ev("uncatalogued_growth")]) is True
+    assert is_newsworthy([ev("uncatalogued_growth", notable=True)]) is True
+
+
+def test_anything_that_is_not_a_routine_metric_is_newsworthy():
+    for kind in ("new_launch", "fragmentation", "ingestion_change",
+                 "deployment", "newly_visible"):
+        assert is_newsworthy([ev("latency_regression"), ev(kind)]) is True, kind
+
+
+def test_an_empty_day_is_not_newsworthy():
+    assert is_newsworthy([]) is False
+
+
+def test_routine_types_are_exactly_the_daily_metrics():
+    # If a new event type is ever written once per run per day, it belongs
+    # here too — otherwise it silently restores the every-day issue.
+    assert ROUTINE_TYPES == {"latency_regression", "uncatalogued_growth"}
+
+
+def test_an_unknown_event_type_defaults_to_newsworthy():
+    # Fail toward telling someone. A type nobody classified is more
+    # likely to matter than to be routine.
+    assert is_newsworthy([ev("something_new_entirely")]) is True

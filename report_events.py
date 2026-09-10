@@ -36,6 +36,22 @@ except ImportError:
 
 from src.db.writer import get_engine
 
+#: Event types that occur EVERY day by construction. The two health
+#: metrics are written once per run with an event_key of
+#: '<metric>:<date>', so their detected_at is always today and they are
+#: always "new".
+#:
+#: That made the monitor incapable of silence. It opened an issue on
+#: 2026-09-06, 07, 08 and 09 — and the 09-09 one contained nothing but
+#: these two lines and the words "0 notable". A daily issue that usually
+#: says nothing is the alert-fatigue form of a swallowed error, and it is
+#: precisely what this design was supposed to avoid.
+#:
+#: So they are context, not news: they appear IN a digest, but they no
+#: longer cause one. A metric that crosses its threshold sets notable and
+#: speaks for itself.
+ROUTINE_TYPES = {"latency_regression", "uncatalogued_growth"}
+
 #: Headings, in the order a reader should meet them: the thing that needs
 #: a human first, then context, then housekeeping.
 SECTIONS = [
@@ -57,6 +73,21 @@ SECTIONS = [
 ]
 
 
+def is_newsworthy(rows) -> bool:
+    """
+    Is there anything here a person needs to see?
+
+    Yes if any event is notable, or if anything happened that is not one
+    of the daily health metrics. No otherwise — which is the case on a
+    day when nothing launched and nothing broke up.
+    """
+    for r in rows:
+        event_type, notable = r[0], r[6]
+        if notable or event_type not in ROUTINE_TYPES:
+            return True
+    return False
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -66,6 +97,10 @@ def main(argv=None) -> int:
                          "hours (default 24)")
     ap.add_argument("--out", metavar="FILE",
                     help="Write the digest here as well as to stdout")
+    ap.add_argument("--only-newsworthy", action="store_true",
+                    help="Write nothing to --out unless something other "
+                         "than the daily health metrics happened. Use this "
+                         "when the output triggers a notification.")
     args = ap.parse_args(argv)
 
     with get_engine().connect() as conn:
@@ -81,6 +116,14 @@ def main(argv=None) -> int:
         # Printed rather than silent so a workflow log shows the check ran
         # and found nothing, which is different from the step not running.
         print(f"No new catalogue events in the last {args.since_hours}h.")
+        if args.out:
+            open(args.out, "w", encoding="utf-8").close()
+        return 0
+
+    if args.only_newsworthy and not is_newsworthy(rows):
+        routine = ", ".join(sorted({r[0] for r in rows}))
+        print(f"{len(rows)} new event(s) in the last {args.since_hours}h, "
+              f"all routine ({routine}). Nothing to report.")
         if args.out:
             open(args.out, "w", encoding="utf-8").close()
         return 0

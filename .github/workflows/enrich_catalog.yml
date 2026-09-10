@@ -1,0 +1,133 @@
+# .github/workflows/enrich_catalog.yml
+#
+# Fills the catalogue's descriptive columns from CelesTrak's SATCAT:
+# object type, status, owner, launch date, launch site and orbital
+# geometry, for every satellite already in the table.
+#
+# WHY THIS EXISTS
+# ===============
+# Enrichment ran once, by hand, on 2026-09-05. It filled ten columns for
+# 17,480 of 18,056 objects and looked finished.
+#
+# It was not finished, it was a snapshot. Every object catalogued after
+# that arrived with no launch_date and no object_type, and nothing was
+# scheduled to go back for them. Five days later the effect was visible
+# in the monitor's own output: issue #9 reported six objects from launch
+# 2026-203 as "newly visible" - a launch numbered 203 of 2026, so early
+# September, filed under old-launches-we-had-not-seen purely because its
+# launch_date was NULL.
+#
+# So the detector was misclassifying new launches as historical ones, and
+# the cause was that Phase 2 was an act rather than a process. This makes
+# it a process.
+#
+# SCHEDULE: daily, 06:55 UTC.
+#
+#   After the 06:37 TLE fetch, so the objects that arrived overnight are
+#   in the table before this runs. Before the 07:19 monitor, so they have
+#   a launch_date by the time anything tries to classify them. That
+#   ordering is the point - enrichment after the monitor would leave every
+#   day's new launches misfiled for 24 hours.
+#
+# REQUEST BUDGET: one GET per run.
+#
+#   CelesTrak regenerates SATCAT daily, and seed_satcat.py keeps its own
+#   fetch log and response cache. A GitHub runner is ephemeral, so the
+#   cache never survives between runs and each run fetches once - which is
+#   exactly the documented cadence rather than an accident.
+#
+#   SATELLITE_DB_DIR is pointed at the runner's temp directory. Without
+#   it the default is a Windows path from a developer machine, which on
+#   Linux is not absolute and would create a directory with a backslash
+#   in its name.
+#
+# WHAT IT WILL NOT DO
+# ===================
+# It updates satellites that already exist and never inserts. SATCAT
+# holds 70,580 records against this catalogue's ~18,000, 35,542 of them
+# decayed years ago; inserting would quadruple the table on a 500 MB tier
+# as a side effect of an enrichment pass. Expanding the catalogue is a
+# separate decision - see writer.upsert_satellite_attribution.
+#
+# TIMEOUT: 10 minutes. Measured at 13 s for 70,580 rows on 2026-09-05,
+#   plus the download. Wide on purpose: a killed process writes no failure
+#   row, so the only defence is a timeout that never fires - see the note
+#   in ingest_visibility.yml.
+#
+# DEPENDENCIES: not requirements.txt, which carries the geospatial stack
+#   for src/imagery/ and needs system GDAL.
+#
+# REQUIRED SECRET:
+#   DATABASE_URL -- Supabase Postgres, POOLED connection string (6543).
+
+name: Enrich Catalogue
+
+on:
+  schedule:
+    - cron: "55 6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build the rows and report, but do not write"
+        required: false
+        default: false
+        type: boolean
+      force:
+        description: "Fetch SATCAT even if the log says it is fresh"
+        required: false
+        default: false
+        type: boolean
+
+# One writer at a time. A manual run overlapping the schedule would have
+# two processes updating the same norad_id rows.
+concurrency:
+  group: enrich-catalog
+  cancel-in-progress: false
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "requests>=2.31" "sqlalchemy>=2.0.0" \
+                      "psycopg2-binary>=2.9.0" "numpy>=1.24"
+
+      - name: Enrich from SATCAT
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SATELLITE_DB_DIR: ${{ runner.temp }}/satellite
+        run: |
+          mkdir -p "$SATELLITE_DB_DIR"
+          python -m src.catalog.seed_satcat \
+            ${{ inputs.dry_run == true && '--dry-run' || '--apply' }} \
+            ${{ inputs.force == true && '--force' || '' }}
+
+      # Coverage is the number that decays quietly. Printing it into the
+      # run summary means a drop shows up in the log rather than only in
+      # a misclassification weeks later.
+      - name: Report coverage
+        if: success()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python check_catalog.py | tee coverage.log
+          {
+            echo "### Catalogue coverage"
+            echo '```'
+            grep -E "satellites:|Enriched:|awaiting enrichment|uncatalogued" \
+              coverage.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

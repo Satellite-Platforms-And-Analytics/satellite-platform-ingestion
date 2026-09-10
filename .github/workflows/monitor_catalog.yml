@@ -25,6 +25,13 @@
 #   reported, and nobody learns anything from it. This is silent on a
 #   quiet day and therefore worth reading on a loud one.
 #
+#   --only-newsworthy is the second half of that, and it was missing for
+#   the first four days. The two health metrics are written every run with
+#   an event_key of '<metric>:<date>', so they are always new and the
+#   digest was never empty: issues opened on 09-06, 07, 08 and 09, and the
+#   09-09 one said "0 notable" and carried nothing but those two lines.
+#   The flag makes metrics context rather than cause.
+#
 #   catalog_events.detected_at is set on INSERT and deliberately excluded
 #   from the upsert's DO UPDATE list. A re-detection moves updated_at and
 #   leaves detected_at alone. That single column is what makes "new"
@@ -123,7 +130,7 @@ jobs:
         run: |
           python report_events.py \
             --since-hours "${{ inputs.since_hours || '24' }}" \
-            --out digest.md
+            --only-newsworthy --out digest.md
           if [ -s digest.md ]; then
             echo "has_content=true" >> "$GITHUB_OUTPUT"
           else
