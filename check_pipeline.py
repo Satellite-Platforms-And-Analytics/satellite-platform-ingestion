@@ -129,10 +129,27 @@ def main() -> int:
     # global freshness rule, with a generous multiple: scheduled workflows
     # on shared runners are best-effort and were observed landing 8-12h
     # apart on a 2-hourly cron.
+    #
+    # Thresholds, measured 2026-09-10 over 7 days of scheduled runs rather
+    # than guessed. Sub-daily crons are the ones GitHub drops: propagate
+    # asks hourly and lands on a 3.8h median gap, worst observed 6.1h;
+    # ingest_tle asks 2-hourly and lands on 4.6h, worst 7.8h. Daily jobs
+    # are not dropped at all - ingest_visibility and monitor_catalog both
+    # show a 24.1h median and a 25.9h worst case, i.e. every day they were
+    # asked for. So 14h is tight-ish for the sub-daily pair and 48h is
+    # loose for the daily ones; both are left as they are, because a
+    # threshold that never fires is worth less than one that fires early.
+    #
+    # catalog_enrich and catalog_events were added on 2026-09-10. Both had
+    # been writing to ingestion_log since Phase 2 and neither was watched,
+    # which is precisely the failure this table exists to catch: the job
+    # that quietly stops is the one nobody listed here.
     EXPECTED = {                      # pipeline -> (cadence_h, stale_after_h)
-        "tle_fetch":   (2,  14),
-        "propagation": (1,  14),
-        "visibility":  (24, 48),
+        "tle_fetch":      (2,  14),
+        "propagation":    (1,  14),
+        "visibility":     (24, 48),
+        "catalog_enrich": (24, 48),
+        "catalog_events": (24, 48),
     }
 
     print("\n  Pipeline liveness")
