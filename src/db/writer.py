@@ -697,6 +697,151 @@ def upsert_orbital_positions(positions: Iterable[Mapping[str, Any]]) -> int:
     return written
 
 
+# =====================================================
+# ARCHIVE WATERMARK
+# =====================================================
+
+# Tables whose history is copied to local disk by archive_to_local.py
+# before being deleted from here. Must match that script's TABLES.
+_ARCHIVED_TABLES = {"visibility_windows", "orbital_positions", "tle_history"}
+
+
+
+def _archive_cutoff(table: str, soft_cutoff: datetime) -> "tuple[datetime | None, str]":
+    """
+    How far back it is safe to delete from `table`, and why.
+
+    Returns (cutoff, reason). A cutoff of None means delete nothing.
+
+    The prune used to be a function of the clock alone. Since 2026-09-10
+    this database is the serving layer and `D:` is the warehouse, so the
+    clock is no longer sufficient: the prunes run in GitHub Actions on a
+    fixed schedule while the archive runs on a workstation that might be
+    off. Fixed-clock prune plus intermittent archive loses data silently,
+    and orbital_positions gives a two-day margin before it does.
+
+    So:
+
+        cutoff = LEAST(now() - retention, archived_through)
+
+    with three outcomes, all of them deliberate:
+
+      archive current   the watermark is ahead of the clock cutoff, the
+                        clock wins, and this behaves exactly as it did
+                        before the watermark existed.
+
+      archive behind    the watermark wins. Less is deleted, the table
+                        grows, and nothing is lost. This is the failure
+                        mode we want.
+
+      archive stalled   past max_retention_days the backstop deletes
+                        unarchived rows anyway, because an unbounded
+                        table exhausts a 500 MB tier in days and stops
+                        every pipeline at once. It is logged at ERROR
+                        and recorded as a catalog_events row, because a
+                        silent path that destroys data is the thing this
+                        whole design exists to prevent.
+
+    A table with no watermark row at all is treated as unmanaged and
+    prunes on the clock, so this function cannot break a table that was
+    never part of the archive scheme.
+    """
+    if table not in _ARCHIVED_TABLES:
+        return soft_cutoff, "clock (table is not archived)"
+
+    with _tx() as conn:
+        row = conn.execute(
+            text("SELECT archived_through, max_retention_days "
+                 "FROM archive_watermark WHERE table_name = :t"),
+            {"t": table},
+        ).fetchone()
+
+    if row is None:
+        # 007 has not been applied, or someone deleted the row. Falling
+        # back to the clock would silently restore the old unsafe
+        # behaviour, so refuse instead: a table that grows for a day is
+        # recoverable, a deleted element set is not.
+        logger.error(
+            "No archive_watermark row for %s. Refusing to prune. Apply "
+            "007_archive_watermark.sql, or remove %s from "
+            "_ARCHIVED_TABLES if it is no longer archived.", table, table)
+        return None, "refused (no watermark row)"
+
+    watermark, max_days = row
+
+    if watermark is None:
+        # Nothing archived yet. Deleting now would destroy rows that have
+        # never been copied anywhere.
+        if max_days is None:
+            logger.warning(
+                "%s has never been archived and has no backstop. Pruning "
+                "nothing; the table will grow until archive_to_local.py "
+                "runs.", table)
+            return None, "nothing archived yet, no backstop"
+        hard = datetime.now(timezone.utc) - timedelta(days=max_days)
+        logger.error(
+            "%s has never been archived. Backstop deleting rows older "
+            "than %d days that are on no disk anywhere.", table, max_days)
+        return hard, f"BACKSTOP ({max_days}d, nothing archived)"
+
+    if watermark.tzinfo is None:
+        watermark = watermark.replace(tzinfo=timezone.utc)
+
+    cutoff = min(soft_cutoff, watermark)
+    reason = "clock" if cutoff == soft_cutoff else "archive watermark"
+
+    if max_days is not None:
+        hard = datetime.now(timezone.utc) - timedelta(days=max_days)
+        if hard > cutoff:
+            logger.error(
+                "ARCHIVE BACKSTOP on %s: watermark is at %s but the %d-day "
+                "backstop forces deletion to %s. Rows between those points "
+                "are on no disk anywhere and are being destroyed. The "
+                "archive has not run - check the SatelliteArchive scheduled "
+                "task and D:\\Databases\\satellite\\archive\\archive.log.",
+                table, watermark, max_days, hard)
+            _record_backstop_event(table, watermark, hard, max_days)
+            return hard, f"BACKSTOP ({max_days}d)"
+
+    return cutoff, reason
+
+
+def _record_backstop_event(table: str, watermark, hard, max_days: int) -> None:
+    """
+    Put the backstop in the monitor's digest.
+
+    Logging alone is not enough: these prunes run inside GitHub Actions,
+    and nobody reads a green job's logs. catalog_events is what the daily
+    digest reads, and event_type is outside ROUTINE_TYPES so
+    report_events.py treats it as newsworthy and the issue gets opened.
+
+    Failure to record must never stop the prune - the tier is full, which
+    is why we are here.
+    """
+    try:
+        with _tx() as conn:
+            conn.execute(text("""
+                INSERT INTO catalog_events
+                    (event_type, event_key, object_count, notable, details)
+                VALUES
+                    ('archive_backstop', :k, 0, true, :d)
+                ON CONFLICT (event_type, event_key) DO UPDATE
+                   SET details = EXCLUDED.details, updated_at = NOW()
+            """), {
+                "k": f"{table}:{datetime.now(timezone.utc).date()}",
+                "d": json.dumps({
+                    "table": table,
+                    "archived_through": str(watermark),
+                    "forced_cutoff": str(hard),
+                    "max_retention_days": max_days,
+                    "message": "Unarchived rows were deleted to keep the "
+                               "tier from filling. The archive has not run.",
+                }),
+            })
+    except Exception as exc:                       # noqa: BLE001
+        logger.error("Could not record archive_backstop event: %s", exc)
+
+
 def prune_old_positions(hours: int = 48) -> int:
     """
     Delete orbital_positions older than `hours`. Returns rows deleted.
@@ -709,13 +854,20 @@ def prune_old_positions(hours: int = 48) -> int:
     right after writing new positions without a second round-trip to call
     the SQL function.
     """
+    soft = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff, reason = _archive_cutoff("orbital_positions", soft)
+    if cutoff is None:
+        logger.info("Pruned 0 orbital_positions rows: %s.", reason)
+        return 0
+
     with _tx() as conn:
         result = conn.execute(
             text("DELETE FROM orbital_positions WHERE timestamp < :cutoff"),
-            {"cutoff": datetime.now(timezone.utc) - timedelta(hours=hours)},
+            {"cutoff": cutoff},
         )
         deleted = result.rowcount or 0
-    logger.info("Pruned %d orbital_positions rows older than %dh.", deleted, hours)
+    logger.info("Pruned %d orbital_positions rows older than %s (%s; "
+                "asked for %dh).", deleted, cutoff, reason, hours)
     return deleted
 
 
@@ -871,13 +1023,20 @@ def prune_old_tle_history(days: int = 14) -> int:
     prune run `VACUUM FULL tle_history;` (see cleanup_tle_history.py) or
     the reported size will not move.
     """
+    soft = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff, reason = _archive_cutoff("tle_history", soft)
+    if cutoff is None:
+        logger.info("Pruned 0 tle_history rows: %s.", reason)
+        return 0
+
     with _tx() as conn:
         result = conn.execute(
             text("DELETE FROM tle_history WHERE epoch < :cutoff"),
-            {"cutoff": datetime.now(timezone.utc) - timedelta(days=days)},
+            {"cutoff": cutoff},
         )
         deleted = result.rowcount or 0
-    logger.info("Pruned %d tle_history rows older than %d days.", deleted, days)
+    logger.info("Pruned %d tle_history rows older than %s (%s; asked for "
+                "%d days).", deleted, cutoff, reason, days)
     return deleted
 
 
@@ -898,14 +1057,23 @@ def prune_old_visibility_windows(days: int = 7) -> int:
     Prunes on analysis_date rather than window_start so a whole run
     leaves together and no day is left half-deleted.
     """
+    soft = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff, reason = _archive_cutoff("visibility_windows", soft)
+    if cutoff is None:
+        logger.info("Pruned 0 visibility_windows rows: %s.", reason)
+        return 0
+
+    # analysis_date is a DATE and the watermark is that date at 00:00 UTC,
+    # so .date() here keeps a whole run leaving together - the property
+    # the original prune was written for.
     with _tx() as conn:
         result = conn.execute(
             text("DELETE FROM visibility_windows WHERE analysis_date < :cutoff"),
-            {"cutoff": (datetime.now(timezone.utc) - timedelta(days=days)).date()},
+            {"cutoff": cutoff.date()},
         )
         deleted = result.rowcount or 0
-    logger.info("Pruned %d visibility_windows rows older than %d days.",
-                deleted, days)
+    logger.info("Pruned %d visibility_windows rows older than %s (%s; asked "
+                "for %d days).", deleted, cutoff.date(), reason, days)
     return deleted
 
 

@@ -1,0 +1,14 @@
+# archive_to_local.py - copying history out of Supabase onto local disk.
+#
+#   pip install -r requirements.txt -r requirements-archive.txt
+#
+# Workstation only. No scheduled workflow installs this: the archive runs
+# from Task Scheduler on the machine that has the disk, because GitHub
+# Actions can reach Supabase and cannot reach D:.
+#
+# pandas is also declared in requirements-tracking.txt. Both files list it
+# because both genuinely need it and the groups are installed
+# independently - a package used by two consumers belongs in both lists,
+# not in whichever one happens to be installed first.
+pandas>=2.0.0
+pyarrow>=15.0.0

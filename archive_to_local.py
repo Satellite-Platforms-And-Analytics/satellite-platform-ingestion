@@ -6,9 +6,16 @@ Copy history out of Supabase onto local disk, one whole day at a time.
     python archive_to_local.py --apply
     python archive_to_local.py --apply --table visibility_windows
 
-READ-ONLY against the database. This script never deletes, updates or
-truncates anything. It exists so that deleting becomes safe later, and
-keeping those two jobs in separate scripts is deliberate.
+Reads history; writes one thing. This script never deletes, updates or
+truncates any history table. The single write it makes is to advance
+`archive_watermark.archived_through`, which is how the cloud prunes learn
+what is safe to delete (007_archive_watermark.sql). Keeping the archiving
+and the deleting in separate scripts is deliberate.
+
+The watermark is advanced only after a partition is written AND its row
+count verified against the database, and only to the end of the newest
+contiguous run of archived days. Every safety property of the prune rests
+on that column being conservative.
 
 Why this exists
 ---------------
@@ -209,6 +216,66 @@ def count_day(conn, table: str, day: date) -> int:
     ).scalar_one()
 
 
+# ------------------------------------------------------------- watermark
+
+def contiguous_through(days_archived: set, present: list) -> "date | None":
+    """
+    The last day up to which the archive has NO holes.
+
+    Not simply max(archived). If 09-07 and 09-09 are on disk but 09-08 is
+    not, the watermark must be 09-07: setting it to 09-09 would tell the
+    prune that 09-08 is safe to delete when it exists nowhere. A gap can
+    happen easily - a partition that failed verification is deliberately
+    left unrecorded so the next run retries it.
+
+    Walks the days the database actually holds, in order, and stops at
+    the first one that is not archived.
+    """
+    last = None
+    for d in sorted(present):
+        if d not in days_archived:
+            break
+        last = d
+    return last
+
+
+def update_watermark(conn, table: str, through, rows: int, root: Path) -> None:
+    """
+    Advance archived_through, never retreat it.
+
+    The GREATEST guard matters when only some tables are archived in a
+    run (--table), or when an older day is backfilled after a newer one:
+    a watermark that moves backwards would not lose data, but a watermark
+    that moves backwards and is then trusted by a prune with a backstop
+    would widen the window the backstop destroys.
+    """
+    conn.execute(text("""
+        INSERT INTO archive_watermark
+            (table_name, archived_through, row_count, archive_host,
+             archive_path)
+        VALUES (:t, :through, :rows, :host, :path)
+        ON CONFLICT (table_name) DO UPDATE SET
+            archived_through = GREATEST(
+                archive_watermark.archived_through,
+                EXCLUDED.archived_through),
+            row_count    = EXCLUDED.row_count,
+            archive_host = EXCLUDED.archive_host,
+            archive_path = EXCLUDED.archive_path,
+            -- Set here rather than by a trigger: this is the only writer
+            -- to this table, so a trigger would guard a caller that does
+            -- not exist, at the cost of a CREATE TRIGGER in an otherwise
+            -- trivially re-runnable migration.
+            updated_at   = NOW()
+    """), {
+        "t": table,
+        "through": datetime.combine(through, datetime.max.time(),
+                                    timezone.utc),
+        "rows": rows,
+        "host": socket.gethostname(),
+        "path": str(root),
+    })
+
+
 # ---------------------------------------------------------------------- main
 
 def main(argv=None) -> int:
@@ -310,6 +377,27 @@ def main(argv=None) -> int:
                 print(f"      {d}: {expected:,} rows -> "
                       f"{out.stat().st_size / 1e6:.1f} MB "
                       f"({ratio:.0f} bytes/row) {fmt}")
+
+            # Advance the watermark to the end of the newest hole-free
+            # run, using the manifest as reloaded - so a partition that
+            # failed verification above holds the watermark back rather
+            # than being stepped over.
+            archived = {date.fromisoformat(k.split("/")[1])
+                        for k in manifest["partitions"]
+                        if k.startswith(f"{table}/")}
+            through = contiguous_through(archived, [d for d in present
+                                                    if d < today])
+            if through is not None:
+                rows_through = sum(
+                    manifest["partitions"][key(table, d)]["rows"]
+                    for d in sorted(archived) if d <= through)
+                with engine.begin() as wconn:
+                    update_watermark(wconn, table, through, rows_through, root)
+                print(f"  watermark        : {through} "
+                      f"({rows_through:,} rows on disk)")
+            else:
+                print("  watermark        : not advanced - the oldest day "
+                      "in the database is not archived")
             print()
 
     if args.apply:

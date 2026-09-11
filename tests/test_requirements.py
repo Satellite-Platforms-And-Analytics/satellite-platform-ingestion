@@ -36,12 +36,28 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 
-REQUIREMENTS_FILES = [
-    "requirements.txt",
-    "requirements-imagery.txt",
-    "requirements-tracking.txt",
-    "requirements-dev.txt",
-]
+def _requirements_files() -> list[str]:
+    """
+    Every requirements*.txt in the repo root, discovered rather than
+    listed.
+
+    A hardcoded list has to be edited whenever a group is added, and the
+    failure when someone forgets is this test reporting a package as
+    undeclared when it is declared - a false accusation that costs more
+    time than the file it was guarding. That happened on 2026-09-11 when
+    requirements-archive.txt was added for pyarrow.
+
+    requirements.txt is asserted separately: the core file is the one the
+    scheduled workflows install, so its absence is a different failure
+    from a missing optional group.
+    """
+    found = sorted(p.name for p in REPO.glob("requirements*.txt"))
+    assert "requirements.txt" in found, (
+        "requirements.txt is missing - every scheduled workflow installs it")
+    return found
+
+
+REQUIREMENTS_FILES = _requirements_files()
 
 # Distribution name -> the module name it provides, where the two differ.
 # Only packages this repository actually declares need an entry.
@@ -133,7 +149,6 @@ def _declared() -> dict[str, str]:
     found: dict[str, str] = {}
     for name in REQUIREMENTS_FILES:
         path = REPO / name
-        assert path.exists(), f"{name} is missing"
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.split("#", 1)[0].strip()
             if not line or line.startswith("-"):
