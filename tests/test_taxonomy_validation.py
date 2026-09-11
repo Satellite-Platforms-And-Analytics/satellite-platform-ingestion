@@ -9,6 +9,23 @@ portals). The failure was invisible for weeks. These tests make it loud.
 
 Skips cleanly when WIT or its database is unavailable, so it is safe in CI
 where the WIT database is not present.
+
+SET REQUIRE_WIT=1 WHERE THEY ARE SUPPOSED TO RUN
+================================================
+"Skips by design in CI" only holds up if they run somewhere else, and
+until 2026-09-11 nothing checked that they did. A test that skips in CI
+and is merely believed to run on the workstation is indistinguishable
+from a test that runs nowhere - which is the shape of the original
+failure this file exists for: 17 of 18 subdomains were missing and
+nothing failed.
+
+So on the machine that has WIT installed, run:
+
+    REQUIRE_WIT=1 pytest tests/test_taxonomy_validation.py
+
+and the skips become failures. Same pattern as REQUIRE_SCHEMA in
+tests/test_migrations_idempotent.py, for the same reason: a guard that
+can silently not run is not a guard.
 """
 import os
 import sys
@@ -17,20 +34,35 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+#: Turn every skip below into a failure. Set it wherever WIT is expected
+#: to be importable - the workstation, or any environment that has run
+#: `pip install -e D:\Projects\WIT` (AD-015).
+REQUIRE_WIT = bool(os.environ.get("REQUIRE_WIT"))
+
+
+def _unavailable(reason: str):
+    """Skip, unless the caller has declared WIT must be present."""
+    if REQUIRE_WIT:
+        pytest.fail(f"{reason} - REQUIRE_WIT is set, so this is a failure "
+                    f"rather than a skip. WIT is a declared Phase 3 source "
+                    f"(AD-044); if it is genuinely absent here, unset "
+                    f"REQUIRE_WIT rather than ignoring this.")
+    pytest.skip(reason)
+
 
 @pytest.fixture(scope="module")
 def resources():
     try:
         from src.resources import SatelliteResources
     except Exception as exc:                       # pragma: no cover
-        pytest.skip(f"WIT not importable: {exc}")
+        _unavailable(f"WIT not importable: {exc}")
     try:
         res = SatelliteResources()
     except Exception as exc:                       # pragma: no cover
-        pytest.skip(f"WIT database unavailable: {exc}")
+        _unavailable(f"WIT database unavailable: {exc}")
     if not res._load_taxonomy():                   # empty DB -> nothing to check
         res.close()
-        pytest.skip("WIT taxonomy is empty")
+        _unavailable("WIT taxonomy is empty")
     yield res
     res.close()
 
