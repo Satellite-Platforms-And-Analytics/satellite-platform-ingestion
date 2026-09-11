@@ -15,12 +15,28 @@ The failure was invisible because both files were individually correct.
 Nothing compared them. This test is that comparison, for the half that
 lives in this repository.
 
+WHAT THIS TEST MISSED, AND WHY IT NOW CHECKS MORE
+=================================================
+Until 2026-09-11 it checked only that the seven cache constants were
+built from TLE_DATA_DIR. They were - so it passed, for six days, on a
+file that still resolved TLE_DATA_DIR itself with
+
+    os.environ.get("TLE_DATA_DIR") or os.path.join(BASE_DIR, "data")
+
+which is the silent fallback the consolidation removed from the tool on
+09-05 and the precise mechanism that creates a second ledger. Every
+constant was correctly anchored to a root that could quietly be wrong.
+
+A guard that checks the leaves and not the root is how the thing it
+guards against walks past it. The last three tests here check the root.
+
 It parses config.py rather than importing it, so it runs in CI without
 Space-Track credentials, without the caches, and without the optional
 dependencies the tracking modules pull in.
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -101,3 +117,75 @@ def test_no_account_state_is_anchored_to_base_dir(assignments):
                  if assignments.get(n) == "BASE_DIR"]
     assert not offenders, (
         f"anchored to BASE_DIR and therefore per-checkout: {offenders}")
+
+
+# ── the root, not just the leaves ────────────────────────────────────
+
+def _tree() -> ast.Module:
+    return ast.parse(CONFIG.read_text(encoding="utf-8-sig"))
+
+
+def test_tle_data_dir_is_not_a_silent_fallback():
+    """
+    `X = os.environ.get(...) or <default>` resolves to the default
+    without a word. Everything downstream is then correctly anchored to
+    the wrong folder - an empty ledger and an empty gp_history cache,
+    which reads as "no object has been retrieved" and invites
+    re-requesting histories under a once-per-lifetime rule.
+
+    The tool resolves this through a function that prints before it
+    falls back. This copy must too, or the two drift apart again.
+    """
+    for node in ast.walk(_tree()):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "TLE_DATA_DIR"
+                   for t in node.targets):
+            continue
+        assert not isinstance(node.value, ast.BoolOp), (
+            "TLE_DATA_DIR is assigned with a bare `or` fallback, which "
+            "resolves silently to the tool's own data/ folder and gives "
+            "this copy a private, empty Space-Track ledger. Resolve it "
+            "through _resolve_tle_data_dir(), which says so first.")
+        assert isinstance(node.value, ast.Call), (
+            "TLE_DATA_DIR should come from a resolver function that can "
+            "warn, not from a bare expression.")
+        return
+    pytest.fail("no TLE_DATA_DIR assignment found in config.py")
+
+
+def test_the_fallback_actually_says_something():
+    """
+    A resolver that falls back silently is the same bug with extra
+    indirection, so check the function really does emit something on the
+    path that returns the default.
+    """
+    src = CONFIG.read_text(encoding="utf-8-sig")
+    m = re.search(r"def _resolve_tle_data_dir\b.*?(?=\nTLE_DATA_DIR\s*=)",
+                  src, re.S)
+    assert m, "_resolve_tle_data_dir() is not defined"
+    body = m.group(0)
+    assert "print(" in body or "warn" in body.lower(), (
+        "_resolve_tle_data_dir() returns a fallback without saying so. "
+        "A wrong answer here costs API budget that cannot be refunded.")
+
+
+def test_dotenv_is_anchored_to_this_file():
+    """
+    Bare load_dotenv() searches upward from the CWD, so a PyCharm run
+    configuration or a scheduled task finds nothing and TLE_DATA_DIR
+    goes unset - which lands on the fallback above. The two failures
+    compound: this is how a second ledger appears without any single
+    file being wrong.
+    """
+    for node in ast.walk(_tree()):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "load_dotenv"):
+            assert node.args or node.keywords, (
+                "load_dotenv() is called with no path. It searches from "
+                "the working directory, which PyCharm, Task Scheduler and "
+                "`python <abs path>` all set elsewhere. Pass an absolute "
+                "path built from this file's folder.")
+            return
+    pytest.fail("config.py does not call load_dotenv()")

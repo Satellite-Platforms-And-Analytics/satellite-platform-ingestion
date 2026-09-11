@@ -18,7 +18,23 @@ from dotenv import load_dotenv
 # every terminal session -- important in VS Code, where the "Run
 # Python File" button opens a new terminal each time that won't
 # have variables set in a previous terminal.
-load_dotenv()
+#
+# Anchor the .env to THIS FILE's folder, not the working directory.
+#
+# Bare load_dotenv() searches upward from the CWD. That works when the
+# tool is launched from its own folder and silently finds nothing when
+# it is not -- and PyCharm run configurations, scheduled tasks and
+# `python <abs path>` all set the CWD elsewhere. Since 2026-09-05 the
+# .env is what carries TLE_DATA_DIR, so a missed .env no longer means
+# "credentials absent"; it means the Space-Track caches quietly resolve
+# to a DIFFERENT folder and a second, empty ledger gets created there.
+#
+# Ported from the Satellite Visibility Tool on 2026-09-11. This copy
+# still had the bare call four days after the tool was fixed, because
+# nothing compared the two files -- which is the same gap that produced
+# two ledgers in the first place.
+_CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_CONFIG_DIR, ".env"))
 
 # =====================================================
 # SENSOR INFORMATION (DEFAULTS)
@@ -229,17 +245,50 @@ GCAT_CACHE_MAX_AGE_HOURS = 24
 # Set this in your .env file to point at the same folder as your
 # downloaded TLE files so everything stays together in one place:
 #
-#   TLE_DATA_DIR=C:\Users\toddl\OneDrive\Data Science Project\Data\TLEs
+#   TLE_DATA_DIR=D:\Projects\Data\TLEs
 #
-# If not set, defaults to the tool's own data/ subdirectory so the
-# tool still works out of the box with no configuration needed.
-# Changing this after the first run just means the tool won't find
-# the previously-built cache at the old location -- move the SQLite
-# files to the new location or re-import from the zip files.
-TLE_DATA_DIR = (
-    os.environ.get("TLE_DATA_DIR")
-    or os.path.join(BASE_DIR, "data")
-)
+# Keep this OFF a cloud-synced folder. A live SQLite file in OneDrive
+# is how you get a conflicted copy and, with it, two ledgers again.
+def _resolve_tle_data_dir() -> str:
+    """
+    Where the Space-Track caches and the usage ledger live.
+
+    The fallback is deliberately noisy. Before consolidation, falling
+    back to BASE_DIR/data was harmless because the files were there.
+    Now they are not, so a silent fallback would create a fresh empty
+    ledger and an empty gp_history cache -- and an empty gp_history
+    cache says "no object has been retrieved", which invites
+    re-requesting histories the account has already spent under a
+    once-per-object-per-lifetime rule.
+
+    A wrong answer here costs API budget that cannot be refunded, so
+    say so rather than proceeding quietly.
+    """
+    configured = os.environ.get("TLE_DATA_DIR")
+    if configured:
+        return configured
+
+    fallback = os.path.join(BASE_DIR, "data")
+    print(
+        "\n" + "!" * 70 +
+        "\n  TLE_DATA_DIR is not set, so Space-Track caches will resolve to"
+        "\n    " + fallback +
+        "\n"
+        "\n  That is almost certainly wrong. The consolidated caches live in"
+        "\n  D:\\Projects\\Data\\TLEs, and using this folder instead means:"
+        "\n    - a second, empty request ledger for one account"
+        "\n    - an empty gp_history cache, so objects already retrieved"
+        "\n      look un-retrieved and may be requested again"
+        "\n"
+        "\n  Fix: check that .env sits next to config.py and sets"
+        "\n  TLE_DATA_DIR, or set it in your run configuration."
+        "\n" + "!" * 70 + "\n",
+        flush=True,
+    )
+    return fallback
+
+
+TLE_DATA_DIR = _resolve_tle_data_dir()
 
 # Permanent cross-run satellite confidence database. Stores scoring
 # results for every satellite ever evaluated so they are never re-computed
