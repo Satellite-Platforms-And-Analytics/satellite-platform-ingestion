@@ -9,11 +9,25 @@
 #      changed, which hides real edits in the noise.
 #
 # eol=lf rather than a bare `text=auto`: this repo is also checked out on
-# Linux CI runners, and no tracked file is a .bat/.cmd/.ps1 that would
-# need CRLF to work. (The ones under node_modules/ are ignored.)
+# Linux CI runners. (The node_modules/ ones are ignored.)
 #
 # After adding this, run once:  git add --renormalize .
 * text=auto eol=lf
+
+# ...with one exception, added 2026-09-11. The note above used to say
+# "no tracked file is a .bat/.cmd/.ps1 that would need CRLF to work".
+# archive_daily.cmd is now exactly that file: the wrapper Task Scheduler
+# runs for the daily archive. cmd.exe is not reliably tolerant of LF-only
+# batch files - parenthesised `if` blocks and delayed expansion, which
+# that script uses throughout, are the constructs that break - and the
+# failure is a scheduled job that stops archiving without saying so,
+# which is the failure mode the whole archive exists to prevent.
+#
+# Windows scripts are stored with CRLF and checked out with CRLF. They
+# are never run on the Linux runners.
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
 
 # Binary - never convert, never diff as text.
 *.png   binary
