@@ -16,7 +16,9 @@ debris — which is the question actually worth asking.
 THE THREE SIGNALS, IN ORDER OF INTEREST
 =======================================
 
-  1. NEW LAUNCHES. `launch_date` inside the window. Independent of when
+  1. NEW LAUNCHES. COALESCE(deployment_date, launch_date) inside the
+     window - see EFFECTIVE_LAUNCH below, and note that launch_date alone
+     is wrong for anything deployed from a space station. Independent of when
      we first saw the row, so a late-catalogued object still counts and a
      newly-fetched 1993 fragment does not.
 
@@ -62,6 +64,23 @@ from src.db.writer import get_engine
 #: Objects SATCAT lists as ORB — currently in orbit — as of 2026-09-05.
 FULL_CATALOGUE_REFERENCE = 35_023
 
+#: "When did this object start existing", for every question in this
+#: script that asks how old something is.
+#:
+#: NOT launch_date alone. The international designator convention gives an
+#: object deployed from a space station the STATION's designator, so
+#: SATCAT's launch_date for every ISS cubesat is 1998-11-20 - Zarya's
+#: launch. Measured 2026-09-12: 532 catalogued objects are affected, 8 of
+#: them arriving in 2026, and every single one was being classified
+#: `newly_visible` instead of `deployment` because its apparent age was
+#: ~10,000 days rather than ~10.
+#:
+#: deployment_date (008, from GCAT) is when the object actually began
+#: independent flight. It equals launch_date for 17,138 of the 17,457
+#: objects both sources date, so this changes nothing for a directly
+#: launched satellite and everything for a station-deployed one.
+EFFECTIVE_LAUNCH = "COALESCE(deployment_date, launch_date)"
+
 #: Fallback only. `launch_date` is the real test now; this is used for
 #: rows SATCAT could not describe (uncatalogued objects have no launch
 #: date because they have no catalogue entry).
@@ -91,9 +110,10 @@ def launch_year(key: "str | None") -> "int | None":
     """
     The year out of a launch key, or None.
 
-    Kept as the fallback for rows with no `launch_date` — uncatalogued
+    Kept as the fallback for rows with no effective launch date at all —
+    uncatalogued
     analyst tracks, which SATCAT cannot describe. For everything else
-    `launch_date` is authoritative and this is not consulted.
+    EFFECTIVE_LAUNCH is authoritative and this is not consulted.
     """
     if not key or len(key) < 4 or not key[:4].isdigit():
         return None
@@ -191,7 +211,7 @@ def main(argv=None) -> int:
     with get_engine().connect() as conn:
         total = q(conn, "SELECT count(*) FROM satellites")[0][0]
         dated = q(conn,
-                  "SELECT count(launch_date) FROM satellites")[0][0]
+                  f"SELECT count({EFFECTIVE_LAUNCH}) FROM satellites")[0][0]
         print(f"\nCatalogue: {total:,} objects, {dated:,} with a launch date "
               f"({dated*100.0/max(total,1):.1f}%)")
         gap = FULL_CATALOGUE_REFERENCE - total
@@ -202,12 +222,13 @@ def main(argv=None) -> int:
                   f"and invisible here.")
 
         # ── 1. New launches, by launch date ───────────────────────────
-        launches = q(conn, """
+        launches = q(conn, f"""
             SELECT norad_id, name, intl_designator, object_type,
-                   launch_date, launch_site, created_at::date
+                   {EFFECTIVE_LAUNCH} AS launch_date, launch_site,
+                   created_at::date
               FROM satellites
-             WHERE launch_date >= (now() - make_interval(days => :d))::date
-             ORDER BY launch_date DESC, norad_id
+             WHERE {EFFECTIVE_LAUNCH} >= (now() - make_interval(days => :d))::date
+             ORDER BY {EFFECTIVE_LAUNCH} DESC, norad_id
         """, d=args.days)
 
         print(f"\n{'='*66}\nNEW LAUNCHES — launched in the last {args.days} "
@@ -251,26 +272,26 @@ def main(argv=None) -> int:
             # How long between launch and the catalogue noticing? A
             # widening gap means the pipeline is falling behind, and it
             # is only measurable now that both dates exist.
-            lag = q(conn, """
-                SELECT min(created_at::date - launch_date),
-                       round(avg(created_at::date - launch_date)),
-                       max(created_at::date - launch_date)
+            lag = q(conn, f"""
+                SELECT min(created_at::date - {EFFECTIVE_LAUNCH}),
+                       round(avg(created_at::date - {EFFECTIVE_LAUNCH})),
+                       max(created_at::date - {EFFECTIVE_LAUNCH})
                   FROM satellites
-                 WHERE launch_date >= (now() - make_interval(days => :d))::date
-                   AND created_at::date >= launch_date
+                 WHERE {EFFECTIVE_LAUNCH} >= (now() - make_interval(days => :d))::date
+                   AND created_at::date >= {EFFECTIVE_LAUNCH}
             """, d=args.days)[0]
             if lag and lag[1] is not None:
                 print(f"\n  Launch to first seen: {lag[0]}–{lag[2]} days "
                       f"(mean {lag[1]:.0f})")
 
         # ── 2 & 3. Rows that arrived recently but are not new ─────────
-        arrivals = q(conn, """
+        arrivals = q(conn, f"""
             SELECT norad_id, name, intl_designator, object_type,
-                   launch_date, created_at::date
+                   {EFFECTIVE_LAUNCH} AS launch_date, created_at::date
               FROM satellites
              WHERE created_at >= now() - make_interval(days => :d)
-               AND (launch_date IS NULL
-                    OR launch_date < (now() - make_interval(days => :d))::date)
+               AND ({EFFECTIVE_LAUNCH} IS NULL
+                    OR {EFFECTIVE_LAUNCH} < (now() - make_interval(days => :d))::date)
              ORDER BY created_at DESC
         """, d=args.days)
 
@@ -386,12 +407,12 @@ def main(argv=None) -> int:
         # ── Health metrics ───────────────────────────────────────────
         today = date.today()
 
-        lag_now = q(conn, """
-            SELECT round(avg(created_at::date - launch_date), 1),
+        lag_now = q(conn, f"""
+            SELECT round(avg(created_at::date - {EFFECTIVE_LAUNCH}), 1),
                    count(*)
               FROM satellites
-             WHERE launch_date >= (now() - make_interval(days => :d))::date
-               AND created_at::date >= launch_date
+             WHERE {EFFECTIVE_LAUNCH} >= (now() - make_interval(days => :d))::date
+               AND created_at::date >= {EFFECTIVE_LAUNCH}
         """, d=args.days)[0]
         if lag_now and lag_now[0] is not None:
             mean_lag = float(lag_now[0])

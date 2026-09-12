@@ -324,6 +324,24 @@ _ATTRIBUTION_COLUMNS = [
     ("inclination_deg",   "real"),
     ("apogee_km",         "real"),
     ("perigee_km",        "real"),
+    # Added 2026-09-12 for GCAT (seed_gcat.py). SATCAT fills neither:
+    #
+    #   operator   SATCAT's OWNER is a country-level code, which goes to
+    #              owner_code. GCAT's Owner is the operating organisation,
+    #              resolved to a name through orgs.tsv.
+    #   orbit_type SATCAT's ORBIT_TYPE is a disposition (ORB/IMP/LAN/DOC),
+    #              deliberately not mapped in seed_satcat.py because it is
+    #              not geometry. GCAT's OpOrbit is geometry - 24 values,
+    #              LEO/S, GEO/ID, GTO - which is what this column is for.
+    #
+    # NOT orbit_regime: that belongs to the 2-hourly fetch, and
+    # test_enrichment_does_not_touch_the_orbital_columns enforces it.
+    ("operator",          "text"),
+    ("orbit_type",        "text"),
+    # Added 2026-09-12 (008_deployment_date.sql). When the object began
+    # flying independently, which for anything released from a space
+    # station is not when launch_date says. GCAT's LDate, via seed_gcat.
+    ("deployment_date",   "date"),
     ("data_source",       "text"),
     ("match_method",      "text"),
     ("source_confidence", "real"),

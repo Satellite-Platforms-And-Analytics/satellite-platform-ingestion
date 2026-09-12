@@ -132,20 +132,55 @@ def test_type_mix_totals_match_the_row_count():
     assert total == len(rows)
 
 
-def test_new_launches_are_selected_by_launch_date_not_first_seen():
-    # The substantive guard: the "NEW LAUNCHES" query must filter on
-    # launch_date. Filtering on created_at is what reported 587 COSMOS
-    # 2251 fragments from 1993 as a new launch.
+def _launches_query() -> str:
     import inspect
     import check_new_objects as m
     src = inspect.getsource(m.main)
-    launches_query = src.split("NEW LAUNCHES")[0].split(
-        "launches = q(conn")[-1]
-    assert "WHERE launch_date >=" in launches_query, (
-        "new launches must be selected by launch_date")
-    assert "created_at >=" not in launches_query, (
+    return src.split("NEW LAUNCHES")[0].split("launches = q(conn")[-1]
+
+
+def test_new_launches_are_selected_by_launch_date_not_first_seen():
+    # The substantive guard: the "NEW LAUNCHES" query must filter on when
+    # the object came into existence. Filtering on created_at is what
+    # reported 587 COSMOS 2251 fragments from 1993 as a new launch.
+    q = _launches_query()
+    assert "WHERE {EFFECTIVE_LAUNCH} >=" in q, (
+        "new launches must be selected by the effective launch date")
+    assert "created_at >=" not in q, (
         "created_at is when WE first saw a row, not when the object "
         "came into existence")
+
+
+def test_new_launches_use_the_deployment_date_when_there_is_one():
+    """
+    launch_date alone misfiles every station-deployed object.
+
+    The international designator convention gives an object released from
+    a space station the STATION's designator, so SATCAT's launch_date for
+    every ISS cubesat is 1998-11-20 - Zarya's launch. Measured against
+    GCAT on 2026-09-12: 532 catalogued objects, 8 of them arriving in
+    2026, each with an apparent age near 10,000 days. All of them fell
+    past the `launch_age_days <= DEPLOYMENT_WINDOW_DAYS` test and were
+    reported as `newly_visible` - an old object that merely became
+    trackable - rather than as the deployment it was.
+
+    This is the same failure as the 2026-203 defect on 2026-09-09: a
+    detector keyed on launch_date fed a value that is correct by
+    convention and useless for the question. There the value was NULL;
+    here it is 1998.
+    """
+    import check_new_objects as m
+    assert m.EFFECTIVE_LAUNCH == "COALESCE(deployment_date, launch_date)"
+    q = _launches_query()
+    assert "deployment_date" not in q or "{EFFECTIVE_LAUNCH}" in q, (
+        "reference the shared expression rather than inlining the "
+        "COALESCE, so every query that asks an object's age agrees")
+    # No bare `launch_date >=` comparison may survive: that is the form
+    # that reads 1998 for an object deployed last week.
+    import re
+    assert not re.search(r"(?<![_{])\blaunch_date\s*>=", q), (
+        "a bare launch_date comparison is back; it reads 1998-11-20 for "
+        "every ISS-deployed cubesat")
 
 
 def test_the_designator_year_rule_survives_only_as_a_fallback():

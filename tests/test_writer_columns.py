@@ -151,6 +151,11 @@ OWNED_BY_ENRICHMENT = {
     # to write, and adding it there would mean passing NULL twelve times
     # a day into a column enrichment owns.
     "owner_code",
+    # 008_deployment_date.sql - GCAT's LDate, via seed_gcat.py. Not in
+    # _SATELLITE_COLUMNS for the same reason as owner_code: the 2-hourly
+    # CelesTrak fetch has no deployment data, and putting it there would
+    # pass NULL twelve times a day into a column enrichment owns.
+    "deployment_date",
 }
 
 

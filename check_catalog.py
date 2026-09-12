@@ -54,6 +54,9 @@ DESCRIPTIVE = [
     "orbit_type", "launch_date", "launch_site", "launch_vehicle",
     "expected_lifetime_yr", "mass_kg", "perigee_km", "apogee_km",
     "inclination_deg", "period_min", "rcs_size", "status", "object_type",
+    # 008_deployment_date.sql. Listed because a column nothing reports on
+    # is a column whose coverage nobody notices collapsing.
+    "deployment_date",
 ]
 
 # Added by 004_catalog_provenance.sql.
@@ -155,21 +158,40 @@ def main(argv=None) -> int:
                 print(f"    {method or '(none)':<14}{n:>9,}   "
                       f"mean confidence {avg or 0:.2f}")
 
-            # The convention lives in 004's COMMENT ON COLUMN: 1.0
-            # norad_id, 0.9 intl_designator, 0.7 exact name, below that
-            # fuzzy. The interesting number is the bottom bucket - those
-            # are the rows a false positive would be hiding in.
-            print("\n  By confidence:")
-            for label, lo, hi in (("1.0  exact norad", 1.0, 1.01),
-                                  ("0.9  designator", 0.9, 1.0),
-                                  ("0.7  exact name", 0.7, 0.9),
-                                  ("<0.7 fuzzy     ", 0.0, 0.7)):
-                n = q(conn, """
-                    SELECT count(*) FROM satellites
-                     WHERE source_confidence >= :lo
-                       AND source_confidence < :hi
-                """, lo=lo, hi=hi)[0][0]
-                print(f"    {label}{n:>9,}")
+            # Confidence and match method are TWO axes, and this report
+            # used to conflate them. It labelled the buckets with methods
+            # taken from 004's comment - 1.0 norad_id, 0.9 designator,
+            # 0.7 exact name - which held while SATCAT was the only
+            # source. GCAT broke it on 2026-09-12: an EXACT norad_id join
+            # at 0.95, because the match is certain and the source is
+            # secondary. The report then announced 17,486 rows matched "by
+            # designator" when every one of them matched by catalogue
+            # number.
+            #
+            # A cross-tabulation cannot make that mistake: it shows what
+            # each row actually says rather than inferring one axis from
+            # the other. The interesting cell is still the bottom-left -
+            # low confidence on a fuzzy method is where a false positive
+            # hides.
+            print("\n  Confidence x match method"
+                  "  (two independent axes - an exact join from a")
+            print("  secondary source is high-certainty and "
+                  "less-than-authoritative):")
+            rows = q(conn, """
+                SELECT COALESCE(match_method, '(none)'),
+                       source_confidence, count(*)
+                  FROM satellites
+                 WHERE data_source IS NOT NULL
+                 GROUP BY 1, 2
+                 ORDER BY 2 DESC NULLS LAST, 3 DESC
+            """)
+            if not rows:
+                print("    (nothing enriched yet)")
+            else:
+                print(f"    {'confidence':>10}  {'match method':<18}{'rows':>9}")
+                for method, conf, n in rows:
+                    c = "(null)" if conf is None else f"{conf:.2f}"
+                    print(f"    {c:>10}  {method:<18}{n:>9,}")
 
             unscored = q(conn, """
                 SELECT count(*) FROM satellites
