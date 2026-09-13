@@ -1,0 +1,683 @@
+{
+  "source": "technologies_readiness.py, Satellite Visibility Tool, 2026-06-26",
+  "extracted": "2026-09-12",
+  "domain": "space",
+  "note": "Hand-curated TRL/MRL assessments. Every record carries `src` as its assessment basis - AD-052: a readiness level with no stated basis is an opinion. Edit this file, not the database.",
+  "categories": [
+    {
+      "slug": "cm",
+      "name": "Communications"
+    },
+    {
+      "slug": "ex",
+      "name": "Space Exploration"
+    },
+    {
+      "slug": "gn",
+      "name": "GNC & Avionics"
+    },
+    {
+      "slug": "hy",
+      "name": "Hypersonic Systems"
+    },
+    {
+      "slug": "lp",
+      "name": "Launch Propulsion"
+    },
+    {
+      "slug": "oo",
+      "name": "On-Orbit Operations"
+    },
+    {
+      "slug": "pl",
+      "name": "Satellite Platforms"
+    },
+    {
+      "slug": "pw",
+      "name": "Power Systems"
+    },
+    {
+      "slug": "py",
+      "name": "Payloads & Sensors"
+    },
+    {
+      "slug": "re",
+      "name": "Reentry & Landing"
+    },
+    {
+      "slug": "sm",
+      "name": "Structures & Materials"
+    },
+    {
+      "slug": "sp",
+      "name": "Spacecraft Propulsion"
+    },
+    {
+      "slug": "th",
+      "name": "Thermal Management"
+    }
+  ],
+  "technologies": [
+    {
+      "ref": "cm-001",
+      "category": "Communications",
+      "name": "X-Band Transponders",
+      "trl": 9,
+      "mrl": 9,
+      "description": "Standard NASA/DoD deep-space and military comms. Decades of heritage.",
+      "assessment_basis": "NASA/USAF"
+    },
+    {
+      "ref": "cm-002",
+      "category": "Communications",
+      "name": "Ka-Band High-Throughput Satellite",
+      "trl": 9,
+      "mrl": 8,
+      "description": "High-capacity broadband payload. Operational across multiple constellations.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "cm-003",
+      "category": "Communications",
+      "name": "Optical / Laser Communications Terminal",
+      "trl": 7,
+      "mrl": 6,
+      "description": "LCRD, LLCD, TBIRD flight-demonstrated. Commercial terminals in early production.",
+      "assessment_basis": "NASA/DARPA"
+    },
+    {
+      "ref": "cm-004",
+      "category": "Communications",
+      "name": "Software-Defined Radio (space)",
+      "trl": 8,
+      "mrl": 7,
+      "description": "Reconfigurable payload with on-orbit waveform updates. Production established.",
+      "assessment_basis": "USAF/NASA"
+    },
+    {
+      "ref": "cm-005",
+      "category": "Communications",
+      "name": "Phased Array Antennas (active)",
+      "trl": 8,
+      "mrl": 7,
+      "description": "Electronically steered antennas for LEO constellations. Rapidly maturing.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "cm-006",
+      "category": "Communications",
+      "name": "Quantum Key Distribution (space)",
+      "trl": 5,
+      "mrl": 3,
+      "description": "Chinese Micius demonstrated QKD. Western programs in early development.",
+      "assessment_basis": "ESA"
+    },
+    {
+      "ref": "cm-007",
+      "category": "Communications",
+      "name": "Inter-Satellite Link — Optical",
+      "trl": 7,
+      "mrl": 6,
+      "description": "Laser crosslinks for constellation backbone. Starlink Gen 2, Tesat LCT.",
+      "assessment_basis": "SpaceX/Tesat"
+    },
+    {
+      "ref": "ex-001",
+      "category": "Space Exploration",
+      "name": "Crewed Lunar Lander (HLS)",
+      "trl": 6,
+      "mrl": 5,
+      "description": "SpaceX Starship HLS, Blue Origin. Subsystem tests underway.",
+      "assessment_basis": "NASA"
+    },
+    {
+      "ref": "ex-002",
+      "category": "Space Exploration",
+      "name": "In-Situ Resource Utilization (ISRU)",
+      "trl": 5,
+      "mrl": 3,
+      "description": "MOXIE on Perseverance demonstrated O2 from CO2. Regolith systems early stage.",
+      "assessment_basis": "NASA"
+    },
+    {
+      "ref": "ex-003",
+      "category": "Space Exploration",
+      "name": "Cryogenic Propellant Storage (long-duration)",
+      "trl": 5,
+      "mrl": 3,
+      "description": "Zero-boiloff storage not yet demonstrated in space.",
+      "assessment_basis": "NASA"
+    },
+    {
+      "ref": "ex-004",
+      "category": "Space Exploration",
+      "name": "EVA Suit — xEMU / AxEMU",
+      "trl": 6,
+      "mrl": 5,
+      "description": "Next-gen Moon/Mars EVA suits. Design mature; production qualification ongoing.",
+      "assessment_basis": "NASA/Axiom"
+    },
+    {
+      "ref": "gn-001",
+      "category": "GNC & Avionics",
+      "name": "Star Trackers",
+      "trl": 9,
+      "mrl": 9,
+      "description": "Optical attitude sensors on virtually all spacecraft. Commoditized.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "gn-002",
+      "category": "GNC & Avionics",
+      "name": "Ring Laser Gyroscopes",
+      "trl": 9,
+      "mrl": 9,
+      "description": "High-accuracy inertial navigation. Multiple qualified suppliers.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "gn-003",
+      "category": "GNC & Avionics",
+      "name": "MEMS IMUs (space-grade)",
+      "trl": 8,
+      "mrl": 8,
+      "description": "Miniaturized IMUs enabling smallsat GNC. Rad-hardened variants in production.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "gn-004",
+      "category": "GNC & Avionics",
+      "name": "Reaction Wheels",
+      "trl": 9,
+      "mrl": 9,
+      "description": "Standard attitude control. Multiple sizes from CubeSat to GEO.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "gn-005",
+      "category": "GNC & Avionics",
+      "name": "Autonomous Rendezvous & Docking",
+      "trl": 7,
+      "mrl": 6,
+      "description": "Dragon, HTV, Cygnus heritage. Commercial products emerging.",
+      "assessment_basis": "NASA/Industry"
+    },
+    {
+      "ref": "gn-006",
+      "category": "GNC & Avionics",
+      "name": "AI-Based GNC / Onboard ML",
+      "trl": 5,
+      "mrl": 3,
+      "description": "ML for autonomous navigation and fault detection. Limited flight qualification.",
+      "assessment_basis": "NASA/DARPA"
+    },
+    {
+      "ref": "gn-007",
+      "category": "GNC & Avionics",
+      "name": "Terrain Relative Navigation",
+      "trl": 7,
+      "mrl": 5,
+      "description": "Mars 2020 TRN flight-demonstrated. Lunar variant for Artemis in development.",
+      "assessment_basis": "NASA/JPL"
+    },
+    {
+      "ref": "hy-001",
+      "category": "Hypersonic Systems",
+      "name": "Hypersonic Glide Vehicle",
+      "trl": 6,
+      "mrl": 5,
+      "description": "Multiple nations flight-tested. US LRHW and CPS in development.",
+      "assessment_basis": "DoD/DARPA"
+    },
+    {
+      "ref": "hy-002",
+      "category": "Hypersonic Systems",
+      "name": "Scramjet Propulsion",
+      "trl": 5,
+      "mrl": 3,
+      "description": "X-51A Waverider demonstrated. No operational engines in production.",
+      "assessment_basis": "AFRL/Boeing"
+    },
+    {
+      "ref": "hy-003",
+      "category": "Hypersonic Systems",
+      "name": "Ultra-High-Temperature Ceramics (UHTC)",
+      "trl": 6,
+      "mrl": 4,
+      "description": "HfB2/ZrB2 for leading edges >2000°C. Manufacturing scale limited.",
+      "assessment_basis": "NASA/AFRL"
+    },
+    {
+      "ref": "lp-001",
+      "category": "Launch Propulsion",
+      "name": "LOX/LH2 Cryogenic Engines",
+      "trl": 9,
+      "mrl": 9,
+      "description": "RS-25, Vulcain, RL-10 class engines. Highest-performance chemical propulsion.",
+      "assessment_basis": "NASA/ESA"
+    },
+    {
+      "ref": "lp-002",
+      "category": "Launch Propulsion",
+      "name": "LOX/Kerosene (RP-1) Engines",
+      "trl": 9,
+      "mrl": 9,
+      "description": "Merlin, RD-180, F-1 class. Dense storable propellants, extensive heritage.",
+      "assessment_basis": "SpaceX/NASA"
+    },
+    {
+      "ref": "lp-003",
+      "category": "Launch Propulsion",
+      "name": "Solid Rocket Boosters",
+      "trl": 9,
+      "mrl": 9,
+      "description": "High-thrust solid motors. Reliable and simple across many launch vehicles.",
+      "assessment_basis": "NASA/USAF"
+    },
+    {
+      "ref": "lp-004",
+      "category": "Launch Propulsion",
+      "name": "LOX/Methane Engines",
+      "trl": 8,
+      "mrl": 7,
+      "description": "Raptor, BE-4, Prometheus. Flight-demonstrated; full reusability still maturing.",
+      "assessment_basis": "SpaceX/Blue Origin"
+    },
+    {
+      "ref": "lp-005",
+      "category": "Launch Propulsion",
+      "name": "Nuclear Thermal Propulsion",
+      "trl": 4,
+      "mrl": 3,
+      "description": "NERVA heritage; modern designs at component phase. No recent flight demo.",
+      "assessment_basis": "NASA/DARPA"
+    },
+    {
+      "ref": "lp-006",
+      "category": "Launch Propulsion",
+      "name": "Air-Breathing Combined Cycle (TBCC/RBCC)",
+      "trl": 5,
+      "mrl": 3,
+      "description": "Turbine/rocket combined cycle for reusable first stages. Component demos; integrated system unflown.",
+      "assessment_basis": "DARPA/AFRL"
+    },
+    {
+      "ref": "oo-001",
+      "category": "On-Orbit Operations",
+      "name": "On-Orbit Servicing — Life Extension",
+      "trl": 7,
+      "mrl": 5,
+      "description": "Northrop MEV-1/MEV-2 operationally flown. Servicer production limited.",
+      "assessment_basis": "Northrop/DARPA"
+    },
+    {
+      "ref": "oo-002",
+      "category": "On-Orbit Operations",
+      "name": "Active Debris Removal",
+      "trl": 5,
+      "mrl": 3,
+      "description": "ESA ClearSpace-1, Astroscale ELSA-d. Flight demos imminent.",
+      "assessment_basis": "ESA/Astroscale"
+    },
+    {
+      "ref": "oo-003",
+      "category": "On-Orbit Operations",
+      "name": "On-Orbit Refueling",
+      "trl": 6,
+      "mrl": 4,
+      "description": "OSAM-1/Restore-L. ISS RRM demos; full autonomous mission not flown.",
+      "assessment_basis": "NASA/DARPA"
+    },
+    {
+      "ref": "oo-004",
+      "category": "On-Orbit Operations",
+      "name": "In-Space Manufacturing",
+      "trl": 4,
+      "mrl": 3,
+      "description": "Fabrication in microgravity. ISS experiments done; useful production rates not achieved.",
+      "assessment_basis": "NASA/Industry"
+    },
+    {
+      "ref": "pl-001",
+      "category": "Satellite Platforms",
+      "name": "CubeSats (1U–6U)",
+      "trl": 9,
+      "mrl": 9,
+      "description": "Standardized smallsats. Fully commoditized ecosystem.",
+      "assessment_basis": "Industry/Universities"
+    },
+    {
+      "ref": "pl-002",
+      "category": "Satellite Platforms",
+      "name": "SmallSats (6–500 kg)",
+      "trl": 9,
+      "mrl": 8,
+      "description": "Commercial bus platforms. Volume production ramping with constellation demand.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "pl-003",
+      "category": "Satellite Platforms",
+      "name": "GEO Communications Bus",
+      "trl": 9,
+      "mrl": 9,
+      "description": "Boeing 702, Airbus Eurostar, SSL 1300. Fully mature; decades of heritage.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "pl-004",
+      "category": "Satellite Platforms",
+      "name": "LEO Broadband Constellation Satellite",
+      "trl": 8,
+      "mrl": 8,
+      "description": "Mass-produced flat-panel LEO satellites. Starlink, OneWeb, Kuiper.",
+      "assessment_basis": "SpaceX/OneWeb/Amazon"
+    },
+    {
+      "ref": "pw-001",
+      "category": "Power Systems",
+      "name": "Triple-Junction GaAs Solar Arrays",
+      "trl": 9,
+      "mrl": 8,
+      "description": ">30% efficiency cells. Dominates commercial and government satellites.",
+      "assessment_basis": "NASA/ESA/Industry"
+    },
+    {
+      "ref": "pw-002",
+      "category": "Power Systems",
+      "name": "Flexible Rollout Solar Arrays (ROSA)",
+      "trl": 8,
+      "mrl": 7,
+      "description": "Lightweight arrays deployed on ISS and Gateway. Supply chain developing.",
+      "assessment_basis": "NASA/Redwire"
+    },
+    {
+      "ref": "pw-003",
+      "category": "Power Systems",
+      "name": "Lithium-Ion Batteries (space-grade)",
+      "trl": 9,
+      "mrl": 8,
+      "description": "Standard energy storage. Custom qualification adds cost vs. commercial cells.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "pw-004",
+      "category": "Power Systems",
+      "name": "RTG (Radioisotope Thermoelectric Generator)",
+      "trl": 9,
+      "mrl": 7,
+      "description": "Pu-238 generators for deep-space missions. Limited by Pu-238 supply chain.",
+      "assessment_basis": "NASA/DoE"
+    },
+    {
+      "ref": "pw-005",
+      "category": "Power Systems",
+      "name": "Fission Surface Power (Kilopower/KRUSTY)",
+      "trl": 5,
+      "mrl": 3,
+      "description": "KRUSTY nuclear demo complete. Full power system not yet built or tested.",
+      "assessment_basis": "NASA/DoE"
+    },
+    {
+      "ref": "pw-006",
+      "category": "Power Systems",
+      "name": "Perovskite Solar Cells (space)",
+      "trl": 4,
+      "mrl": 3,
+      "description": "Emerging high-efficiency PV. Radiation tolerance and qualification in progress.",
+      "assessment_basis": "ESA/Industry"
+    },
+    {
+      "ref": "py-001",
+      "category": "Payloads & Sensors",
+      "name": "Synthetic Aperture Radar (SAR)",
+      "trl": 9,
+      "mrl": 8,
+      "description": "Sentinel-1, Radarsat, NovaSAR operational. Small SAR satellites in production.",
+      "assessment_basis": "ESA/CSA/Industry"
+    },
+    {
+      "ref": "py-002",
+      "category": "Payloads & Sensors",
+      "name": "Electro-Optical / IR Imagers",
+      "trl": 9,
+      "mrl": 8,
+      "description": "Sub-meter commercial imagers in volume production.",
+      "assessment_basis": "Industry/NRO"
+    },
+    {
+      "ref": "py-003",
+      "category": "Payloads & Sensors",
+      "name": "Hyperspectral Imagers (space)",
+      "trl": 8,
+      "mrl": 7,
+      "description": "DESIS, PRISMA, EnMAP operational. Lower-cost commercial units emerging.",
+      "assessment_basis": "ESA/NASA"
+    },
+    {
+      "ref": "py-004",
+      "category": "Payloads & Sensors",
+      "name": "Space-Based LIDAR",
+      "trl": 8,
+      "mrl": 7,
+      "description": "ICESat-2, GEDI scientifically operational. Smaller tactical lidar maturing.",
+      "assessment_basis": "NASA"
+    },
+    {
+      "ref": "py-005",
+      "category": "Payloads & Sensors",
+      "name": "GNSS-Reflectometry (GNSS-R)",
+      "trl": 7,
+      "mrl": 6,
+      "description": "CYGNSS operational. Smallsat products entering market.",
+      "assessment_basis": "NASA/Industry"
+    },
+    {
+      "ref": "py-006",
+      "category": "Payloads & Sensors",
+      "name": "Quantum Sensing / Gravimetry (space)",
+      "trl": 5,
+      "mrl": 3,
+      "description": "Atom interferometry. Ground demos excellent; space-hardened systems not qualified.",
+      "assessment_basis": "ESA/NASA"
+    },
+    {
+      "ref": "re-001",
+      "category": "Reentry & Landing",
+      "name": "Propulsive Vertical Landing",
+      "trl": 8,
+      "mrl": 7,
+      "description": "Falcon 9 operationally demonstrated. Starship Super Heavy qualifying.",
+      "assessment_basis": "SpaceX/Blue Origin"
+    },
+    {
+      "ref": "re-002",
+      "category": "Reentry & Landing",
+      "name": "Supersonic Retropropulsion",
+      "trl": 7,
+      "mrl": 5,
+      "description": "Mars 2020 partial demo. Large-scale Mars Human Landing in development.",
+      "assessment_basis": "NASA/SpaceX"
+    },
+    {
+      "ref": "re-003",
+      "category": "Reentry & Landing",
+      "name": "HIAD Inflatable Reentry Decelerator",
+      "trl": 6,
+      "mrl": 4,
+      "description": "Subscale orbital tests flown. Full-scale system not yet demonstrated.",
+      "assessment_basis": "NASA"
+    },
+    {
+      "ref": "re-004",
+      "category": "Reentry & Landing",
+      "name": "Supersonic Parachutes (planetary)",
+      "trl": 8,
+      "mrl": 7,
+      "description": "MSL, Mars 2020, InSight flight-qualified. LOFTID Earth demo 2022.",
+      "assessment_basis": "NASA"
+    },
+    {
+      "ref": "sm-001",
+      "category": "Structures & Materials",
+      "name": "Carbon Fiber Reinforced Polymer (CFRP)",
+      "trl": 9,
+      "mrl": 9,
+      "description": "Primary structural material for fairings, buses, and booms.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "sm-002",
+      "category": "Structures & Materials",
+      "name": "Additively Manufactured Metal Structures",
+      "trl": 7,
+      "mrl": 6,
+      "description": "3D-printed Ti/Inconel brackets. Flight-proven; qualification maturing.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "sm-003",
+      "category": "Structures & Materials",
+      "name": "PICA Ablative Heat Shield",
+      "trl": 9,
+      "mrl": 8,
+      "description": "Used on Dragon, Stardust, MSL. High-heritage; manufacturing established.",
+      "assessment_basis": "NASA/SpaceX"
+    },
+    {
+      "ref": "sm-004",
+      "category": "Structures & Materials",
+      "name": "High-Temperature CMC",
+      "trl": 7,
+      "mrl": 6,
+      "description": "SiC/SiC ceramic matrix composites for nozzle liners and TPS.",
+      "assessment_basis": "NASA/Industry"
+    },
+    {
+      "ref": "sm-005",
+      "category": "Structures & Materials",
+      "name": "Self-Healing Composites",
+      "trl": 4,
+      "mrl": 2,
+      "description": "Micro-vascular networks for autonomous repair. Lab demonstrations only.",
+      "assessment_basis": "NASA/Universities"
+    },
+    {
+      "ref": "sm-006",
+      "category": "Structures & Materials",
+      "name": "Aerogel Insulation (space)",
+      "trl": 7,
+      "mrl": 6,
+      "description": "Ultra-low thermal conductivity for cryogenic tanks and landers.",
+      "assessment_basis": "NASA/JPL"
+    },
+    {
+      "ref": "sp-001",
+      "category": "Spacecraft Propulsion",
+      "name": "Hydrazine Monopropellant Thrusters",
+      "trl": 9,
+      "mrl": 9,
+      "description": "Standard attitude/orbit control on thousands of satellites.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "sp-002",
+      "category": "Spacecraft Propulsion",
+      "name": "Bipropellant (MMH/NTO) Systems",
+      "trl": 9,
+      "mrl": 9,
+      "description": "High-Isp chemical propulsion for GEO insertion and large maneuvers.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "sp-003",
+      "category": "Spacecraft Propulsion",
+      "name": "Hall Effect Thrusters",
+      "trl": 8,
+      "mrl": 7,
+      "description": "High-efficiency xenon ion propulsion (PPS-1350, SPT-100). In production; scaling limited.",
+      "assessment_basis": "ESA/NASA"
+    },
+    {
+      "ref": "sp-004",
+      "category": "Spacecraft Propulsion",
+      "name": "Gridded Ion Engines",
+      "trl": 8,
+      "mrl": 7,
+      "description": "Very high Isp electric propulsion. Dawn, Deep Space 1 flight heritage.",
+      "assessment_basis": "NASA/JPL"
+    },
+    {
+      "ref": "sp-005",
+      "category": "Spacecraft Propulsion",
+      "name": "Green Monopropellant (AF-M315E)",
+      "trl": 7,
+      "mrl": 6,
+      "description": "Low-toxicity hydrazine alternative. STP-2, GPIM flight-demonstrated.",
+      "assessment_basis": "NASA/AFRL"
+    },
+    {
+      "ref": "sp-006",
+      "category": "Spacecraft Propulsion",
+      "name": "Cold Gas Thrusters",
+      "trl": 9,
+      "mrl": 9,
+      "description": "Simplest propulsion. Widely used on cubesats and inspection vehicles.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "sp-007",
+      "category": "Spacecraft Propulsion",
+      "name": "Electrospray / FEEP Thrusters",
+      "trl": 6,
+      "mrl": 5,
+      "description": "Ultra-precise micro-Newton thrusters. LISA Pathfinder demo; limited production.",
+      "assessment_basis": "ESA/NASA"
+    },
+    {
+      "ref": "sp-008",
+      "category": "Spacecraft Propulsion",
+      "name": "Solar Sail Propulsion",
+      "trl": 6,
+      "mrl": 4,
+      "description": "LightSail 2 and IKAROS demonstrated controlled solar sailing.",
+      "assessment_basis": "NASA/JAXA"
+    },
+    {
+      "ref": "th-001",
+      "category": "Thermal Management",
+      "name": "Heat Pipes (spacecraft)",
+      "trl": 9,
+      "mrl": 9,
+      "description": "Passive two-phase thermal transport. Ubiquitous; multiple manufacturers.",
+      "assessment_basis": "Industry"
+    },
+    {
+      "ref": "th-002",
+      "category": "Thermal Management",
+      "name": "Loop Heat Pipes",
+      "trl": 8,
+      "mrl": 7,
+      "description": "Advanced passive thermal devices. Used on many LEO/GEO satellites.",
+      "assessment_basis": "NASA/ESA/Industry"
+    },
+    {
+      "ref": "th-003",
+      "category": "Thermal Management",
+      "name": "Deployable Radiators",
+      "trl": 7,
+      "mrl": 6,
+      "description": "Foldout radiators for high-power payloads. ISS ETCS is heritage.",
+      "assessment_basis": "NASA/Industry"
+    },
+    {
+      "ref": "th-004",
+      "category": "Thermal Management",
+      "name": "Two-Phase Mechanically Pumped Loop",
+      "trl": 6,
+      "mrl": 5,
+      "description": "Higher-efficiency active thermal control. Ground and parabolic demos.",
+      "assessment_basis": "ESA/NASA"
+    }
+  ]
+}
