@@ -84,6 +84,16 @@ concurrency:
 #   on the file, so the first reclaim needs the VACUUM FULL in
 #   cleanup_tle_history.py. After that this step keeps it flat.
 
+# SECURITY: least privilege for GITHUB_TOKEN.
+#
+# Without a `permissions:` block a workflow inherits the repository
+# default, which on many repositories is read/write on contents - so a job
+# that only needs to read code runs holding a token that can push to the
+# default branch. Declared explicitly here so the answer does not depend
+# on a repository setting nobody re-checks. Added 2026-09-13.
+permissions:
+  contents: read
+
 jobs:
   ingest:
     runs-on: ubuntu-latest
@@ -106,12 +116,37 @@ jobs:
 
       - name: Run fetcher.py (dry run)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+        # SECURITY: free-text inputs reach the shell as environment
+        # variables, never as ${{ }} interpolation. A `${{ inputs.x }}`
+        # inside `run:` is substituted into the script *before* bash sees
+        # it, so a dispatcher could close the command and append their own
+        # -- in a job that has DATABASE_URL in its environment. Quoted
+        # "$VAR" is data to bash, whatever it contains. Boolean inputs are
+        # typed and cannot carry a payload, so they stay inline.
+        env:
+          GROUP: ${{ inputs.group }}
         run: |
-          python -m src.tle.fetcher --dry-run ${{ inputs.group != '' && format('--group {0}', inputs.group) || '' }}
+          if [ -n "$GROUP" ]; then
+            python -m src.tle.fetcher --dry-run --group "$GROUP"
+          else
+            python -m src.tle.fetcher --dry-run
+          fi
 
       - name: Run fetcher.py (write to database)
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
+        # SECURITY: free-text inputs reach the shell as environment
+        # variables, never as ${{ }} interpolation. A `${{ inputs.x }}`
+        # inside `run:` is substituted into the script *before* bash sees
+        # it, so a dispatcher could close the command and append their own
+        # -- in a job that has DATABASE_URL in its environment. Quoted
+        # "$VAR" is data to bash, whatever it contains. Boolean inputs are
+        # typed and cannot carry a payload, so they stay inline.
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GROUP: ${{ github.event_name == 'workflow_dispatch' && inputs.group || '' }}
         run: |
-          python -m src.tle.fetcher --prune-history ${{ github.event_name == 'workflow_dispatch' && inputs.group != '' && format('--group {0}', inputs.group) || '' }}
+          if [ -n "$GROUP" ]; then
+            python -m src.tle.fetcher --prune-history --group "$GROUP"
+          else
+            python -m src.tle.fetcher --prune-history
+          fi

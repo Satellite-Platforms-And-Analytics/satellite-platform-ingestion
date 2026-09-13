@@ -61,6 +61,16 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# SECURITY: least privilege for GITHUB_TOKEN.
+#
+# Without a `permissions:` block a workflow inherits the repository
+# default, which on many repositories is read/write on contents - so a job
+# that only needs to read code runs holding a token that can push to the
+# default branch. Declared explicitly here so the answer does not depend
+# on a repository setting nobody re-checks. Added 2026-09-13.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

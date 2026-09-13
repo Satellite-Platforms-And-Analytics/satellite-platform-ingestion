@@ -113,22 +113,31 @@ jobs:
       # allowed to end the job - the issue is how it gets reported.
       - name: Detect and record
         id: detect
+        # SECURITY: free-text inputs travel as environment variables, not
+        # as ${{ }} interpolation, which is substituted before bash parses
+        # the script. This job holds DATABASE_URL and a token with
+        # issues:write, so it is the most valuable of the six to get right.
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DAYS: ${{ inputs.days || '30' }}
         run: |
           set +e
-          python check_new_objects.py \
-            --days "${{ inputs.days || '30' }}" --record | tee detect.log
+          python check_new_objects.py --days "$DAYS" --record | tee detect.log
           echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
           set -e
 
       - name: Build the digest
         id: digest
+        # SECURITY: free-text inputs travel as environment variables, not
+        # as ${{ }} interpolation, which is substituted before bash parses
+        # the script. This job holds DATABASE_URL and a token with
+        # issues:write, so it is the most valuable of the six to get right.
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SINCE_HOURS: ${{ inputs.since_hours || '24' }}
         run: |
           python report_events.py \
-            --since-hours "${{ inputs.since_hours || '24' }}" \
+            --since-hours "$SINCE_HOURS" \
             --only-newsworthy --out digest.md
           if [ -s digest.md ]; then
             echo "has_content=true" >> "$GITHUB_OUTPUT"
@@ -142,6 +151,7 @@ jobs:
           inputs.no_issue != true
         env:
           GH_TOKEN: ${{ github.token }}
+          DAYS: ${{ inputs.days || '30' }}
         run: |
           DATE=$(date -u +%Y-%m-%d)
           {
@@ -150,7 +160,7 @@ jobs:
             echo "---"
             echo
             echo "Recorded in \`catalog_events\`. Detection window: "
-            echo "${{ inputs.days || '30' }} days."
+            echo "$DAYS days."
             echo
             echo "[Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           } > issue.md

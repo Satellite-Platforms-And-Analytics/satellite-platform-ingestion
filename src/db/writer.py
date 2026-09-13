@@ -118,9 +118,57 @@ def get_engine() -> Engine:
         if database_url.startswith("postgres://"):
             database_url = database_url.replace("postgres://", "postgresql://", 1)
 
-        _ENGINE = create_engine(database_url, poolclass=NullPool, future=True)
-        logger.info("Database engine created (NullPool).")
+        connect_args = _tls_connect_args(database_url)
+        _ENGINE = create_engine(database_url, poolclass=NullPool, future=True,
+                                connect_args=connect_args)
+        logger.info("Database engine created (NullPool, sslmode=%s).",
+                    connect_args.get("sslmode", "from URL"))
     return _ENGINE
+
+
+#: Hosts for which an unencrypted connection is acceptable, because the
+#: connection never leaves the machine.
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", ""})
+
+
+def _tls_connect_args(database_url: str) -> dict:
+    """
+    Force TLS unless the database is local.
+
+    WHY THIS IS NOT LEFT TO THE URL
+    ===============================
+    libpq's default `sslmode` is **prefer**, which tries TLS and then
+    **silently falls back to an unencrypted connection** if the handshake
+    does not succeed. Not an error, not a warning - a plaintext session
+    carrying the database password, indistinguishable in every log from an
+    encrypted one.
+
+    `DATABASE_URL` in this project carried no `sslmode` at all (found
+    2026-09-13), so every pipeline run, local and in GitHub Actions, was
+    one failed handshake away from that. Supabase requires TLS, so the
+    fallback has never actually happened - which is exactly why it would
+    never have been noticed.
+
+    Setting it here rather than in `.env` means it cannot be lost by
+    copying a connection string out of a dashboard, and it covers every
+    consumer of `get_engine()` at once. An explicit `sslmode` in the URL
+    still wins: `connect_args` does not override a URL parameter, so an
+    operator who deliberately sets `sslmode=verify-full` keeps it.
+
+    `require` encrypts but does not verify the server certificate.
+    `verify-full` is the stronger setting and needs a CA bundle on every
+    runner; that is the next step, not this one, and it is recorded in the
+    security baseline rather than silently skipped.
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(database_url)
+    if "sslmode=" in (parts.query or ""):
+        return {}                      # operator has chosen; do not override
+    host = (parts.hostname or "").lower()
+    if host in _LOCAL_HOSTS:
+        return {}                      # never leaves the machine
+    return {"sslmode": "require"}
 
 
 @contextmanager

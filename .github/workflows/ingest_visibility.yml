@@ -117,6 +117,16 @@ concurrency:
   group: ingest-visibility
   cancel-in-progress: false
 
+# SECURITY: least privilege for GITHUB_TOKEN.
+#
+# Without a `permissions:` block a workflow inherits the repository
+# default, which on many repositories is read/write on contents - so a job
+# that only needs to read code runs holding a token that can push to the
+# default branch. Declared explicitly here so the answer does not depend
+# on a repository setting nobody re-checks. Added 2026-09-13.
+permissions:
+  contents: read
+
 jobs:
   visibility:
     runs-on: ubuntu-latest
@@ -138,12 +148,22 @@ jobs:
           pip install -r requirements.txt
 
       - name: Compute and write visibility windows
+        # SECURITY: free-text inputs reach the shell as environment
+        # variables, never as ${{ }} interpolation. A `${{ inputs.x }}`
+        # inside `run:` is substituted into the script *before* bash sees
+        # it, so a dispatcher could close the command and append their own
+        # -- in a job that has DATABASE_URL in its environment. Quoted
+        # "$VAR" is data to bash, whatever it contains. Boolean inputs are
+        # typed and cannot carry a payload, so they stay inline.
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SENSOR: ${{ inputs.sensor }}
+          RUN_DATE: ${{ inputs.date }}
+          RUN_LIMIT: ${{ inputs.limit }}
         run: |
-          python -m src.visibility \
-            ${{ inputs.sensor != '' && format('--sensor {0}', inputs.sensor) || '--all-sensors' }} \
-            ${{ inputs.date != '' && format('--date {0}', inputs.date) || '' }} \
-            ${{ inputs.limit != '' && format('--limit {0}', inputs.limit) || '' }} \
+          if [ -n "$SENSOR" ]; then set -- --sensor "$SENSOR"; else set -- --all-sensors; fi
+          [ -n "$RUN_DATE" ] && set -- "$@" --date "$RUN_DATE"
+          [ -n "$RUN_LIMIT" ] && set -- "$@" --limit "$RUN_LIMIT"
+          python -m src.visibility "$@" \
             ${{ inputs.dry_run == true && '--dry-run' || '' }} \
             ${{ !(inputs.dry_run == true) && !(inputs.skip_prune == true) && '--prune' || '' }}

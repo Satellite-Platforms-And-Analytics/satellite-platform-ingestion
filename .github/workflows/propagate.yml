@@ -70,6 +70,16 @@ concurrency:
   group: propagate-positions
   cancel-in-progress: false
 
+# SECURITY: least privilege for GITHUB_TOKEN.
+#
+# Without a `permissions:` block a workflow inherits the repository
+# default, which on many repositories is read/write on contents - so a job
+# that only needs to read code runs holding a token that can push to the
+# default branch. Declared explicitly here so the answer does not depend
+# on a repository setting nobody re-checks. Added 2026-09-13.
+permissions:
+  contents: read
+
 jobs:
   propagate:
     runs-on: ubuntu-latest
@@ -91,10 +101,19 @@ jobs:
           pip install -r requirements.txt
 
       - name: Propagate and write
+        # SECURITY: free-text inputs reach the shell as environment
+        # variables, never as ${{ }} interpolation. A `${{ inputs.x }}`
+        # inside `run:` is substituted into the script *before* bash sees
+        # it, so a dispatcher could close the command and append their own
+        # -- in a job that has DATABASE_URL in its environment. Quoted
+        # "$VAR" is data to bash, whatever it contains. Boolean inputs are
+        # typed and cannot carry a payload, so they stay inline.
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RUN_LIMIT: ${{ inputs.limit }}
         run: |
-          python -m src.propagation --once \
-            ${{ inputs.limit != '' && format('--limit {0}', inputs.limit) || '' }} \
+          set -- --once
+          [ -n "$RUN_LIMIT" ] && set -- "$@" --limit "$RUN_LIMIT"
+          python -m src.propagation "$@" \
             ${{ inputs.dry_run == true && '--dry-run' || '' }} \
             ${{ !(inputs.dry_run == true) && !(inputs.skip_prune == true) && '--prune' || '' }}
