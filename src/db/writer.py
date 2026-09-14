@@ -483,6 +483,119 @@ _ATTRIBUTION_VALUES_TEMPLATE = (
 )
 
 
+# ── Per-field provenance (012_satellite_attribution.sql) ─────────────
+
+_CLAIM_COLUMNS = [
+    ("norad_id",          "int"),
+    ("field",             "text"),
+    ("source",            "text"),
+    ("value",             "text"),
+    ("match_method",      "text"),
+    ("source_confidence", "real"),
+    ("observed_at",       "timestamptz"),
+]
+
+#: A claim about an object this catalogue does not track is skipped, not
+#: an error - the same rule as upsert_satellite_attribution, and the
+#: reason it is expressed as INSERT ... SELECT ... WHERE EXISTS rather
+#: than relying on the foreign key. GCAT offers 70,324 objects against
+#: 17,487 tracked; a foreign-key violation would abort the whole batch
+#: over rows that were never in scope.
+_UPSERT_CLAIM_SQL = f"""
+    INSERT INTO satellite_attribution
+        ({", ".join(c for c, _ in _CLAIM_COLUMNS)})
+    SELECT {", ".join("v." + c for c, _ in _CLAIM_COLUMNS)}
+      FROM (VALUES %s) AS v({", ".join(c for c, _ in _CLAIM_COLUMNS)})
+     WHERE EXISTS (SELECT 1 FROM satellites s WHERE s.norad_id = v.norad_id)
+    ON CONFLICT (norad_id, field, source) DO UPDATE SET
+        value             = EXCLUDED.value,
+        match_method      = EXCLUDED.match_method,
+        source_confidence = EXCLUDED.source_confidence,
+        observed_at       = EXCLUDED.observed_at
+"""
+
+_CLAIM_VALUES_TEMPLATE = (
+    "(" + ", ".join(f"%s::{t}" for _, t in _CLAIM_COLUMNS) + ")"
+)
+
+
+def _as_claim_text(value: Any) -> "str | None":
+    """
+    Normalise a claim to text, once, here.
+
+    Comparison in satellite_attribution is textual, so two sources that
+    agree on a date and format it differently would read as a conflict.
+    Normalising at the single write point rather than in each importer is
+    what keeps that from being a per-source decision.
+
+    date/datetime -> ISO 8601. Everything else -> str(). None stays None
+    and is dropped by the caller: "this source has no opinion" is the
+    default state of a missing row, and recording it would triple the
+    table to say nothing.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value)
+
+
+def record_attribution_claims(
+        rows: Iterable[Mapping[str, Any]],
+        fields: "Iterable[str] | None" = None) -> int:
+    """
+    Record what this source claims about each field, alongside what every
+    other source claims (012).
+
+    Takes the SAME row dicts as `upsert_satellite_attribution`, so a
+    caller adds one line and cannot drift out of step with what it wrote:
+    the claims are derived from the payload rather than re-stated.
+
+    `satellites` is unchanged by this. It stays the serving table with one
+    typed value per column; this is the evidence beneath it, and the two
+    are written from one payload precisely so they cannot disagree about
+    what a pass did.
+
+    NULL values are not recorded. A missing row already means "this source
+    said nothing", and writing NULLs would roughly triple the table to
+    express the same thing.
+    """
+    fields = list(fields) if fields is not None else list(_ATTRIBUTION_DESCRIPTIVE)
+    unknown = set(fields) - set(_ATTRIBUTION_DESCRIPTIVE)
+    if unknown:
+        raise ValueError(
+            f"cannot record claims for non-descriptive columns: "
+            f"{sorted(unknown)}. Known: {sorted(_ATTRIBUTION_DESCRIPTIVE)}.")
+
+    prepared = []
+    for r in rows:
+        norad = r.get("norad_id")
+        source = r.get("data_source")
+        if norad is None:
+            raise ValueError(f"claim row missing norad_id: {r}")
+        if not source:
+            raise ValueError(
+                f"claim row for norad {norad} has no data_source. A claim "
+                f"with no claimant is the thing this table exists to "
+                f"prevent.")
+        observed = r.get("matched_at") or datetime.now(timezone.utc)
+        for f in fields:
+            text_value = _as_claim_text(r.get(f))
+            if text_value is None:
+                continue
+            prepared.append((
+                norad, f, source, text_value,
+                r.get("match_method"), r.get("source_confidence"), observed,
+            ))
+
+    if not prepared:
+        return 0
+
+    # `template` is the third positional; the fourth is page_size. Passing
+    # a table name there would have set a page size of "satellite_attribution".
+    return _bulk_upsert(_UPSERT_CLAIM_SQL, prepared, _CLAIM_VALUES_TEMPLATE)
+
+
 def upsert_satellite_attribution(
         rows: Iterable[Mapping[str, Any]],
         fill_only: "Iterable[str]" = ()) -> int:

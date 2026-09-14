@@ -91,7 +91,9 @@ try:
 except ImportError:
     pass
 
-from src.db.writer import get_engine, log_step, upsert_satellite_attribution
+from src.db.writer import (get_engine, log_step,
+                           record_attribution_claims,
+                           upsert_satellite_attribution)
 
 from sqlalchemy import text
 
@@ -790,6 +792,13 @@ def main(argv=None) -> int:
         # in particular NEEDS to overwrite: the 2,772 differences there
         # are this repository's own transliterated-name fix landing.
         updated = upsert_satellite_attribution(payload, fill_only=FILL_ONLY)
+        # Record what GCAT claims, from the same payload, so the evidence
+        # table and the serving table cannot disagree about what this pass
+        # did (012). Note this records the launch_date GCAT claims even
+        # though fill_only stops it being written: keeping the losing
+        # claim is the whole point -- the 66 disagreements become data
+        # rather than a line in a report nobody re-runs.
+        claims = record_attribution_claims(payload)
     except Exception as exc:
         # Logging the failure must never replace the failure. On
         # 2026-09-12 a bad run_id made this handler raise, and the UUID
@@ -810,6 +819,10 @@ def main(argv=None) -> int:
                      f"{len(rows)} records", source="gcat")
     print(f"\nEnriched {updated:,} satellites from {len(rows):,} GCAT "
           f"records.")
+    print(f"Recorded {claims:,} per-field claims in satellite_attribution "
+          f"(012) —\n  including the launch dates fill_only declined to "
+          f"write. A losing\n  claim kept is the difference between a "
+          f"disagreement and a decision.")
     print("Run `python check_catalog.py` to confirm no row gained a value "
           "without provenance.")
     return 0

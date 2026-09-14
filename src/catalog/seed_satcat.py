@@ -522,12 +522,17 @@ def main(argv=None) -> int:
         return 0
 
     # -- apply -----------------------------------------------------------
-    from src.db.writer import log_step, upsert_satellite_attribution
+    from src.db.writer import (log_step, record_attribution_claims,
+                               upsert_satellite_attribution)
 
     run_id = str(uuid.uuid4())
     started = time.monotonic()
     try:
         updated = upsert_satellite_attribution(built)
+        # Same payload, so the evidence table and the serving table cannot
+        # disagree about what this pass did (012). SATCAT is the reason the
+        # table is useful at all: a second opinion needs a first one.
+        claims = record_attribution_claims(built)
     except Exception as exc:
         log_step(run_id, pipeline="catalog_enrich", step="write_db",
                  status="failed", message=str(exc), source="celestrak_satcat")
@@ -537,6 +542,8 @@ def main(argv=None) -> int:
     log_step(run_id, pipeline="catalog_enrich", step="write_db",
              status="success", records_processed=updated,
              duration_s=elapsed, source="celestrak_satcat")
+    print(f"Recorded {claims:,} per-field claims in satellite_attribution "
+          f"(012).")
 
     # The gap between what SATCAT knows and what we track is the number
     # worth printing. Reporting only "updated N" would make a catalogue
