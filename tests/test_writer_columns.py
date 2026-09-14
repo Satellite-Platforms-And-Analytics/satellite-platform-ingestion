@@ -156,6 +156,16 @@ OWNED_BY_ENRICHMENT = {
     # CelesTrak fetch has no deployment data, and putting it there would
     # pass NULL twelve times a day into a column enrichment owns.
     "deployment_date",
+    # 011_organizations.sql - GCAT's Owner code, the exact key to
+    # organizations(code). Same owner and the same reasoning as
+    # deployment_date: seed_gcat.py has it, the CelesTrak fetch does not.
+    #
+    # Note this is the third column to arrive by exactly this route, which
+    # is a shape worth naming: every field that makes the catalogue useful
+    # for anything other than propagation comes from enrichment, not from
+    # the 2-hourly fetch. The split is the architecture, not an exception
+    # to it.
+    "operator_code",
 }
 
 
