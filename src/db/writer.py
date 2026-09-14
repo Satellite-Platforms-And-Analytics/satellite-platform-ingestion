@@ -591,9 +591,22 @@ def record_attribution_claims(
     if not prepared:
         return 0
 
-    # `template` is the third positional; the fourth is page_size. Passing
-    # a table name there would have set a page size of "satellite_attribution".
-    return _bulk_upsert(_UPSERT_CLAIM_SQL, prepared, _CLAIM_VALUES_TEMPLATE)
+    # count_affected=True is NOT optional here, and the reason is written
+    # in _bulk_upsert's own docstring: the default returns the number of
+    # rows SUBMITTED, which is only equal to the number written when every
+    # row can match. This statement filters on WHERE EXISTS, so a claim
+    # about an object outside the catalogue is submitted and discarded.
+    #
+    # Without it the first run reported "454,074 claims recorded" for GCAT
+    # and "687,497" for SATCAT - the prepared counts, over 70,324 and
+    # 70,661 source rows - when roughly 113,000 and 170,000 were actually
+    # stored against the ~17,500 objects tracked. Four times the truth, in
+    # the direction of looking more successful.
+    #
+    # _bulk_upsert warns about exactly this failure, three lines above the
+    # parameter that prevents it.
+    return _bulk_upsert(_UPSERT_CLAIM_SQL, prepared, _CLAIM_VALUES_TEMPLATE,
+                        count_affected=True)
 
 
 def upsert_satellite_attribution(

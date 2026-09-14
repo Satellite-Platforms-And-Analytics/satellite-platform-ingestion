@@ -113,3 +113,36 @@ def test_untracked_objects_are_skipped_not_fatal():
 def test_reimport_updates_rather_than_duplicating():
     assert "ON CONFLICT (norad_id, field, source) DO UPDATE" \
         in writer._UPSERT_CLAIM_SQL
+
+
+def test_the_claim_writer_counts_what_was_written_not_what_was_sent():
+    """
+    The statement filters on WHERE EXISTS, so submitted != written. The
+    default _bulk_upsert return is the submitted count, and using it here
+    reported 454,074 GCAT claims when ~113,000 were stored -- four times
+    the truth, in the direction of looking more successful.
+
+    _bulk_upsert's own docstring calls this "the absence made to look like
+    success, which is this project's most expensive recurring bug", three
+    lines above the parameter that prevents it.
+    """
+    import inspect
+    src = inspect.getsource(writer.record_attribution_claims)
+    assert "count_affected=True" in src, (
+        "record_attribution_claims must count rows written, not submitted")
+
+
+def test_any_filtering_statement_must_count_affected():
+    """
+    Generalised: a writer whose SQL can match nothing cannot report the
+    submitted count. This catches the next one rather than this one.
+    """
+    import inspect
+    for name in ("record_attribution_claims", "upsert_satellite_attribution"):
+        fn = getattr(writer, name)
+        src = inspect.getsource(fn)
+        sql_name = [n for n in ("_UPSERT_CLAIM_SQL", "_UPDATE_ATTRIBUTION_SQL",
+                                "sql") if n in src]
+        assert "count_affected=True" in src, (
+            f"{name} sends rows through a statement that can match nothing "
+            f"({sql_name}); it must count affected rows")
