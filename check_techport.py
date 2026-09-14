@@ -111,12 +111,57 @@ class Client:
         rem = r.headers.get("X-RateLimit-Remaining")
         if rem and rem.isdigit():
             self.remaining = int(rem)
-        if r.status_code == 429:
+        if r.status_code >= 400:
+            # THE SERVER'S EXPLANATION IS THE POINT OF THE ERROR.
+            #
+            # raise_for_status() throws away the response body, so a 403
+            # arrived as "403 Client Error: Forbidden" with the actual
+            # reason - which api.data.gov puts in a JSON body naming the
+            # exact fault - discarded. Guessing at an error the server
+            # already explained is the failure mode this project keeps
+            # cataloguing under "an error path that destroys the error".
+            #
+            # The URL is deliberately NOT echoed: requests puts the full
+            # query string, api_key included, into its own message, which
+            # is how a key ends up in a terminal, a screenshot or a paste.
+            detail = ""
+            try:
+                body = r.json()
+                err = body.get("error", body) if isinstance(body, dict) else body
+                if isinstance(err, dict):
+                    detail = " | ".join(
+                        f"{k}: {v}" for k, v in err.items()
+                        if k in ("code", "message", "error", "reason"))
+                detail = detail or str(body)[:300]
+            except Exception:                                # noqa: BLE001
+                detail = (r.text or "")[:300]
+
+            hint = ""
+            if r.status_code == 403:
+                hint = (
+                    "\n\n  403 from api.data.gov is almost always the key, "
+                    "not the path.\n"
+                    "    - API_KEY_INVALID   : the key is wrong or "
+                    "mistyped\n"
+                    "    - API_KEY_MISSING   : the value came through "
+                    "empty\n"
+                    "    - API_KEY_DISABLED / _UNAUTHORIZED : registered "
+                    "but not usable yet\n\n"
+                    "  Check it arrived intact:\n"
+                    "    python -c \"import os;k=os.environ.get("
+                    "'NASA_API_KEY','');print(len(k), k[:4]+'...'+k[-4:] "
+                    "if k else 'EMPTY')\"\n"
+                    "  An api.nasa.gov key is 40 characters. If the "
+                    "length is wrong the paste was truncated;\n"
+                    "  if it is 0 the shell variable did not reach "
+                    "python.")
+            if r.status_code == 429:
+                hint = ("\n\n  The hourly limit was reached. This should "
+                        "not happen at this request count - check whether "
+                        "the key is shared with something else.")
             raise SystemExit(
-                "429 from api.nasa.gov - the hourly limit was reached. "
-                "This should not happen at this request count; check "
-                "whether the key is shared with something else.")
-        r.raise_for_status()
+                f"HTTP {r.status_code} from api.nasa.gov{path}\n"
+                f"  server said: {detail}{hint}")
         time.sleep(PAUSE_S)
         return r.json()
 
