@@ -372,6 +372,15 @@ _ATTRIBUTION_COLUMNS = [
     ("inclination_deg",   "real"),
     ("apogee_km",         "real"),
     ("perigee_km",        "real"),
+    # Added 2026-09-14 (011_organizations.sql). GCAT's Owner code, kept as
+    # a code this time: the exact foreign key to organizations(code).
+    #
+    # It was being read, used to look up a name, and dropped - so the
+    # database held "who operates this" as a string and every
+    # company-to-satellite question would have needed a fuzzy match. The
+    # name is still written, because a name is what a page renders; the
+    # code is what a join uses.
+    ("operator_code",     "text"),
     # Added 2026-09-12 for GCAT (seed_gcat.py). SATCAT fills neither:
     #
     #   operator   SATCAT's OWNER is a country-level code, which goes to

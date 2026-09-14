@@ -221,22 +221,45 @@ def _read_tsv(path: Path, expected: list, label: str):
 
 def load_org_names(path: Path) -> dict:
     """
-    Code -> operator name.
+    Code -> operator name, in English where GCAT has one.
 
-    Prefers `Name`, falls back to `ShortName`. A code whose row has
-    neither is left unmapped rather than defaulting to the code, so the
-    survey can report how many objects that affects.
+    CHANGED 2026-09-14. This preferred `Name`, and `Name` is GCAT's
+    **transliterated native form**:
+
+        CAST  Name  'Zhongguo kongjian jishu yanjiu yuan'
+              EName 'Chinese Academy of Space Technology'
+        JAXA  Name  'Ucyu Koku Kenkyu Kaihatsu Kikou'
+              EName 'Japan Aerospace Exploration Agency'
+
+    So `satellites.operator` held names no English-language reader
+    recognises, and a "top operators" chart would have looked like a data
+    fault rather than a column choice. `EName` was in the same file the
+    whole time, populated on 34% of organisations - precisely the ones
+    where `Name` is not English. Its absence means `Name` is already
+    English, not that the name is unknown.
+
+    Order: EName -> Name -> ShortName. A code whose row has none is left
+    unmapped rather than defaulting to the code, so the survey can report
+    how many objects that affects.
+
+    **This changes existing rows.** Re-running --apply rewrites `operator`
+    for every object owned by one of the 1,388 organisations with an
+    EName. That shows up in the survey as DIFFER, which is the survey
+    working, not a conflict between sources: the disagreement is with this
+    repository's own previous choice of column.
     """
     names = {}
     for row in _read_tsv(path, EXPECTED_ORGS_HEADER, "orgs.tsv"):
         code = _clean(row["Code"])
         if not code:
             continue
-        names[code] = _clean(row["Name"]) or _clean(row["ShortName"])
+        names[code] = (_clean(row["EName"]) or _clean(row["Name"])
+                       or _clean(row["ShortName"]))
     return {k: v for k, v in names.items() if v}
 
 
-def resolve_owner(code: "str | None", orgs: dict) -> "tuple[str | None, str]":
+def resolve_owner(code: "str | None",
+                  orgs: dict) -> "tuple[str | None, str | None, str]":
     """
     GCAT Owner code -> operator name, plus how it was resolved.
 
@@ -257,22 +280,31 @@ def resolve_owner(code: "str | None", orgs: dict) -> "tuple[str | None, str]":
     A compound resolved by its first component returns 'partial', so the
     survey can report how many operators are the lead of a joint
     arrangement rather than the whole of it.
+
+    RETURNS THE CODE AS WELL, SINCE 2026-09-14
+    ==========================================
+    The resolved code is the exact foreign key to organizations(code), and
+    it is what this function spent its whole life computing and throwing
+    away. The code returned is the one that actually matched - so an
+    uncertain 'GSFC?' yields 'GSFC', and a joint 'NROC/CIA' yields 'NROC',
+    the lead owner, matching the name that goes beside it. Storing the raw
+    compound would give a key that joins to nothing.
     """
     if not code:
-        return None, "none"
+        return None, None, "none"
     if code in orgs:
-        return orgs[code], "exact"
+        return code, orgs[code], "exact"
 
     bare = code.rstrip("?").strip()
     if bare != code and bare in orgs:
-        return orgs[bare], "uncertain"
+        return bare, orgs[bare], "uncertain"
 
     if "/" in bare:
         lead = bare.split("/", 1)[0].strip()
         if lead in orgs:
-            return orgs[lead], "partial"
+            return lead, orgs[lead], "partial"
 
-    return None, "unresolved"
+    return None, None, "unresolved"
 
 
 def build_rows(currentcat: Path, orgs: dict) -> tuple:
@@ -298,7 +330,7 @@ def build_rows(currentcat: Path, orgs: dict) -> tuple:
             continue
 
         owner_code = _clean(rec["Owner"])
-        operator, how = resolve_owner(owner_code, orgs)
+        operator_code, operator, how = resolve_owner(owner_code, orgs)
         st[f"owner_{how}"] += 1
         if how == "unresolved":
             unresolved[owner_code] += 1
@@ -308,6 +340,8 @@ def build_rows(currentcat: Path, orgs: dict) -> tuple:
 
         if operator:
             st["operator"] += 1
+        if operator_code:
+            st["operator_code"] += 1
         if orbit_type:
             st["orbit_type"] += 1
 
@@ -320,6 +354,12 @@ def build_rows(currentcat: Path, orgs: dict) -> tuple:
             "_gcat_name": _clean(rec["Name"]),
             "_gcat_piece": _clean(rec["Piece"]),
             "operator": operator,
+            # The exact key to organizations(code). Written alongside the
+            # name rather than instead of it: a page renders a name, a
+            # join uses a code, and conflating the two is what left this
+            # database unable to answer "what has this company flown"
+            # without matching strings.
+            "operator_code": operator_code,
             "orbit_type": orbit_type,
             "launch_date": launch_date,
             # The same GCAT field feeds both columns, and that is the
@@ -385,7 +425,7 @@ def survey(conn, rows: list) -> None:
     ids = list(by_id)
 
     existing = list(conn.execute(text("""
-        SELECT norad_id, operator, orbit_type, launch_date
+        SELECT norad_id, operator, operator_code, orbit_type, launch_date
           FROM satellites
          WHERE norad_id = ANY(:ids)
     """), {"ids": ids}))
@@ -393,7 +433,7 @@ def survey(conn, rows: list) -> None:
     print(f"  GCAT records with a catalogue number : {len(rows):,}")
     print(f"  of those, tracked here               : {len(existing):,}")
 
-    cols = ("operator", "orbit_type", "launch_date")
+    cols = ("operator", "operator_code", "orbit_type", "launch_date")
     gain = Counter()          # NULL here, value in GCAT -> a real change
     agree = Counter()         # both present, equal
     differ = Counter()        # both present, different
@@ -422,11 +462,26 @@ def survey(conn, rows: list) -> None:
     for col in cols:
         print(f"  {col:<16}{gain[col]:>8,}{agree[col]:>9,}"
               f"{differ[col]:>8,}{offered[col]:>9,}")
-    print("\n  GAINS is the only column that changes anything. `agree` is")
-    print("  two independent catalogues corroborating each other; `DIFFER`")
-    print("  is the interesting case - COALESCE keeps the existing value,")
-    print("  so nothing is lost, but a large number here means the sources")
-    print("  genuinely conflict and per-field provenance is needed.")
+    print("\n  `agree` is two independent catalogues corroborating each")
+    print("  other. `GAINS` is a column that was NULL and now has a value.")
+    print()
+    print("  `DIFFER` OVERWRITES. Corrected 2026-09-14: this report used to")
+    print("  say COALESCE kept the existing value and nothing was lost.")
+    print("  That is true only when GCAT's value is NULL. The statement is")
+    print("  COALESCE(new, existing), so wherever GCAT HAS a value and it")
+    print("  disagrees, GCAT's value replaces what is there. DIFFER is the")
+    print("  count of rows this pass will change, not the count it will")
+    print("  decline to change - read it before applying, not after.")
+    if differ["operator"]:
+        print()
+        print("  READ `operator` DIFFER CAREFULLY THIS TIME. On 2026-09-14")
+        print("  the name preference changed from GCAT's transliterated")
+        print("  `Name` to its English `EName` where one exists, so a large")
+        print("  DIFFER here is NOT two catalogues conflicting - it is this")
+        print("  repository disagreeing with its own earlier choice of")
+        print("  column, and the new value is the intended one. Check the")
+        print("  examples below: 'Zhongguo kongjian jishu yanjiu yuan' ->")
+        print("  'Chinese Academy of Space Technology' is the fix landing.")
 
     for col in cols:
         if examples[col]:
