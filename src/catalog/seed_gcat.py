@@ -118,6 +118,16 @@ DEFAULT_CURRENTCAT = (
 
 #: Between SATCAT's 1.0 and UCS's planned 0.9.
 #:
+#: Columns this source may FILL but not OVERRULE.
+#:
+#: One definition, read by BOTH the survey and the apply. They disagreed
+#: for about fifteen minutes on 2026-09-14 - the apply stopped overwriting
+#: launch_date while the survey still announced that DIFFER rows would
+#: change - which is precisely the defect this file had just finished
+#: correcting, reintroduced by the fix for it. A report and the behaviour
+#: it describes cannot be allowed to come from two places.
+FILL_ONLY = ("launch_date",)
+
 #: Not 1.0: GCAT is a curated secondary catalogue, and where it disagrees
 #: with SATCAT on a field both supply, SATCAT should win - which COALESCE
 #: already guarantees, but the confidence number should say the same thing.
@@ -464,21 +474,26 @@ def survey(conn, rows: list) -> None:
                     examples[col].append((norad, have, want))
 
     print(f"\n  {'column':<16}{'GAINS':>8}{'agree':>9}{'DIFFER':>8}"
-          f"{'offered':>9}")
-    print("  " + "-" * 50)
+          f"{'offered':>9}   applied?")
+    print("  " + "-" * 62)
     for col in cols:
+        note = "fill-only: DIFFER NOT written" if col in FILL_ONLY else ""
         print(f"  {col:<16}{gain[col]:>8,}{agree[col]:>9,}"
-              f"{differ[col]:>8,}{offered[col]:>9,}")
+              f"{differ[col]:>8,}{offered[col]:>9,}   {note}")
     print("\n  `agree` is two independent catalogues corroborating each")
     print("  other. `GAINS` is a column that was NULL and now has a value.")
     print()
-    print("  `DIFFER` OVERWRITES. Corrected 2026-09-14: this report used to")
-    print("  say COALESCE kept the existing value and nothing was lost.")
-    print("  That is true only when GCAT's value is NULL. The statement is")
-    print("  COALESCE(new, existing), so wherever GCAT HAS a value and it")
-    print("  disagrees, GCAT's value replaces what is there. DIFFER is the")
-    print("  count of rows this pass will change, not the count it will")
-    print("  decline to change - read it before applying, not after.")
+    print("  `DIFFER` OVERWRITES, except where the table says fill-only.")
+    print("  Corrected 2026-09-14: this report used to say COALESCE kept")
+    print("  the existing value and nothing was lost. The statement is")
+    print("  COALESCE(new, existing), so wherever GCAT HAS a value and")
+    print("  disagrees, GCAT's value replaces what is there.")
+    if FILL_ONLY:
+        print()
+        print(f"  {', '.join(FILL_ONLY)}: GCAT passes fill_only for this,")
+        print("  so DIFFER rows keep the value they have and only NULLs are")
+        print("  filled. 004 rates SATCAT 1.0 and GCAT 0.95, and the write")
+        print("  path is last-writer-wins, which knows nothing about that.")
     if differ["operator"]:
         print()
         print("  READ `operator` DIFFER CAREFULLY THIS TIME. On 2026-09-14")
@@ -657,8 +672,7 @@ def main(argv=None) -> int:
         # Every other column stays overwritable, deliberately. `operator`
         # in particular NEEDS to overwrite: the 2,772 differences there
         # are this repository's own transliterated-name fix landing.
-        updated = upsert_satellite_attribution(
-            payload, fill_only=("launch_date",))
+        updated = upsert_satellite_attribution(payload, fill_only=FILL_ONLY)
     except Exception as exc:
         # Logging the failure must never replace the failure. On
         # 2026-09-12 a bad run_id made this handler raise, and the UUID

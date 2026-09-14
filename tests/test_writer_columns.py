@@ -257,3 +257,17 @@ def test_bulk_upsert_rejects_wrong_arity():
     with pytest.raises(ValueError, match="arity"):
         writer._bulk_upsert("INSERT INTO t (a, b) VALUES %s",
                             [(1, 2), (3,)], template="(%s, %s)")
+
+
+def test_gcat_fill_only_names_real_columns():
+    """
+    seed_gcat.FILL_ONLY is read by both its survey and its apply. A name
+    that is not a descriptive attribution column would make the survey
+    print a promise the writer does not keep -- and the writer rejects it
+    at call time, which is far too late to be reading a report by.
+    """
+    from src.catalog import seed_gcat
+    from src.db import writer as w
+    unknown = set(seed_gcat.FILL_ONLY) - set(w._ATTRIBUTION_DESCRIPTIVE)
+    assert not unknown, (
+        f"seed_gcat.FILL_ONLY names non-columns: {sorted(unknown)}")
