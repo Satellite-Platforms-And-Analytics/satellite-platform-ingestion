@@ -739,10 +739,17 @@ def main(argv=None) -> int:
     print(f"  with an operator name      : {st['operator']:,}")
     print(f"  with an operator code      : {st['operator_code']:,}")
     print(f"  with an orbit_type         : {st['orbit_type']:,}")
-    print(f"  owner resolved exactly     : {st['owner_exact']:,}")
-    print(f"  ...after stripping '?'     : {st['owner_uncertain']:,}")
-    print(f"  ...by lead of 'A/B' joint  : {st['owner_partial']:,}")
-    print(f"  Owner code unresolved      : {st['owner_unresolved']:,}")
+    # Labelled as read-time figures on purpose. They are counted while
+    # parsing, so they sum to the 74,059 records with a NORAD id and NOT to
+    # the 70,324 objects left after the collapse. Printing them unlabelled
+    # beneath "usable rows" invited exactly the arithmetic that made the
+    # operator counter look wrong.
+    print(f"\n  owner-code resolution, across all {st['rows_before_dedupe']:,} "
+          f"records read:")
+    print(f"    resolved exactly         : {st['owner_exact']:,}")
+    print(f"    ...after stripping '?'   : {st['owner_uncertain']:,}")
+    print(f"    ...by lead of 'A/B' joint: {st['owner_partial']:,}")
+    print(f"    unresolved               : {st['owner_unresolved']:,}")
     if args.show_unresolved and unresolved:
         print("\n  most common unresolved codes:")
         for code, n in unresolved.most_common(args.show_unresolved):
