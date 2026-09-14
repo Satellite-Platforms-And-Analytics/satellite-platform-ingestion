@@ -81,8 +81,30 @@ QUOTA_FLOOR = 200
 PAUSE_S = 0.5
 
 
+#: An api.data.gov key is exactly 40 characters, [A-Za-z0-9]. DEMO_KEY is
+#: the one documented exception and is allowed through so the path can be
+#: exercised without a key - it will stop on its own at 30 requests/hour.
+_KEY_SHAPE = re.compile(r"[A-Za-z0-9]{40}")
+
+
 def _key() -> str:
-    k = os.environ.get("NASA_API_KEY")
+    """Return the API key, or fail locally rather than at the server.
+
+    Two things are deliberate here.
+
+    The value is ``.strip()``ed. A key pasted into ``.env`` with a
+    trailing space or a stray carriage return is still a 40-character
+    key to a human reading the file and a 41-character key to
+    api.data.gov, which answers 403 API_KEY_INVALID - an error whose
+    text points at the key being *wrong* when it is merely *padded*.
+
+    The shape is checked before any request is made. A truncated paste
+    is the most common way this fails, and it costs nothing to say so
+    here instead of spending a request to be told the same thing less
+    clearly. The key's VALUE is never printed, only its length: this
+    message is the kind of thing that ends up in a screenshot.
+    """
+    k = (os.environ.get("NASA_API_KEY") or "").strip()
     if not k:
         raise SystemExit(
             "NASA_API_KEY is not set in the environment or .env.\n"
@@ -90,6 +112,16 @@ def _key() -> str:
             "DEMO_KEY works for a handful of requests (30/hour per IP) but "
             "not for a survey, and techport.nasa.gov direct is deliberately "
             "not used: no key, and no published rate limit (AD-060).")
+    if k != "DEMO_KEY" and not _KEY_SHAPE.fullmatch(k):
+        raise SystemExit(
+            f"NASA_API_KEY does not have the shape of an api.nasa.gov key.\n"
+            f"  expected : 40 characters, letters and digits only\n"
+            f"  got      : {len(k)} characters"
+            f"{'' if k.isalnum() else ', including punctuation or whitespace'}"
+            f"\n\n"
+            "If the length is short the paste was truncated. If there is "
+            "punctuation, the quotes or a\ntrailing comment from .env came "
+            "through with the value. Nothing was sent to the server.")
     return k
 
 
