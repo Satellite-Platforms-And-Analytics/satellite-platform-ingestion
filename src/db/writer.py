@@ -418,15 +418,65 @@ _ATTRIBUTION_DESCRIPTIVE = [
 _ATTRIBUTION_PROVENANCE = ["data_source", "match_method",
                            "source_confidence", "matched_at"]
 
-_UPDATE_ATTRIBUTION_SQL = f"""
+def _attribution_sql(fill_only: "frozenset[str]" = frozenset()) -> str:
+    """
+    Build the attribution UPDATE, with a per-call list of columns a source
+    may FILL but not OVERRULE.
+
+    WHY THIS EXISTS (2026-09-14)
+    ============================
+    The default is `COALESCE(v.c, s.c)` — the incoming value wins whenever
+    it is not NULL. That is right for a source filling gaps, and it is
+    last-writer-wins, which has no idea that this project rated SATCAT at
+    confidence 1.0 and GCAT at 0.95.
+
+    It became concrete rather than theoretical when the GCAT survey
+    reported 66 launch dates differing from SATCAT's. Applying would have
+    let the source judged *less* reliable silently overrule the one judged
+    *more* reliable, on the only column where the two disagree — and the
+    survey's own text had been describing that as "nothing is lost" since
+    2026-09-11.
+
+    `fill_only` inverts the COALESCE for named columns: `COALESCE(s.c,
+    v.c)`, so an existing value stands and a NULL is still filled. It is a
+    property of the CALL, not of the column, on purpose. SATCAT must keep
+    being able to correct a launch date it wrote itself; what it must not
+    do is let a secondary catalogue overwrite it. Making the column
+    permanently fill-only would take that away from both.
+
+    This is a stopgap with a known shape. The real answer is per-field
+    provenance keyed (norad_id, field, source) — 004 anticipated it and
+    the trigger has now fired twice. Until then, this keeps the confidence
+    ordering from being quietly inverted by whichever importer ran last.
+    """
+    unknown = fill_only - set(_ATTRIBUTION_DESCRIPTIVE)
+    if unknown:
+        raise ValueError(
+            f"fill_only names columns that are not descriptive attribution "
+            f"columns: {sorted(unknown)}. Known: "
+            f"{sorted(_ATTRIBUTION_DESCRIPTIVE)}. A typo here would "
+            f"silently do nothing, so it is rejected.")
+
+    def assign(c: str) -> str:
+        # fill_only: what is already there wins, NULLs still get filled.
+        if c in fill_only:
+            return f"{c} = COALESCE(s.{c}, v.{c})"
+        return f"{c} = COALESCE(v.{c}, s.{c})"
+
+    return f"""
     UPDATE satellites AS s SET
-        {", ".join(f"{c} = COALESCE(v.{c}, s.{c})"
-                   for c in _ATTRIBUTION_DESCRIPTIVE)},
+        {", ".join(assign(c) for c in _ATTRIBUTION_DESCRIPTIVE)},
         {", ".join(f"{c} = v.{c}" for c in _ATTRIBUTION_PROVENANCE)},
         last_updated = now()
     FROM (VALUES %s) AS v({", ".join(c for c, _ in _ATTRIBUTION_COLUMNS)})
     WHERE s.norad_id = v.norad_id
 """
+
+
+#: The default shape: every descriptive column overwritable. Kept as a
+#: module constant because tests assert against it and because most
+#: callers want exactly this.
+_UPDATE_ATTRIBUTION_SQL = _attribution_sql()
 
 _ATTRIBUTION_VALUES_TEMPLATE = (
     "(" + ", ".join(f"%s::{t}" for _, t in _ATTRIBUTION_COLUMNS) + ")"
@@ -434,7 +484,8 @@ _ATTRIBUTION_VALUES_TEMPLATE = (
 
 
 def upsert_satellite_attribution(
-        rows: Iterable[Mapping[str, Any]]) -> int:
+        rows: Iterable[Mapping[str, Any]],
+        fill_only: "Iterable[str]" = ()) -> int:
     """
     Write catalogue attribution onto satellites that already exist.
 
@@ -448,6 +499,12 @@ def upsert_satellite_attribution(
     which is the failure 004_catalog_provenance.sql exists to prevent, so
     it is rejected here rather than written and detected later by
     check_catalog.py.
+
+    `fill_only` names descriptive columns this caller may FILL but not
+    OVERRULE: an existing non-NULL value stands, a NULL is still filled.
+    Use it when the caller is a secondary source for that column. GCAT
+    passes `("launch_date",)` because SATCAT is rated more reliable there
+    and the two disagree on 66 rows; see `_attribution_sql`.
     """
     prepared = []
     for r in rows:
@@ -463,7 +520,9 @@ def upsert_satellite_attribution(
     if not prepared:
         return 0
 
-    written = _bulk_upsert(_UPDATE_ATTRIBUTION_SQL, prepared,
+    sql = _attribution_sql(frozenset(fill_only)) if fill_only \
+        else _UPDATE_ATTRIBUTION_SQL
+    written = _bulk_upsert(sql, prepared,
                            template=_ATTRIBUTION_VALUES_TEMPLATE,
                            count_affected=True)
     logger.info("Enriched %d satellite rows.", written)

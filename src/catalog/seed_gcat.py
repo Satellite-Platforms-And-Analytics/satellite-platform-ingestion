@@ -645,7 +645,20 @@ def main(argv=None) -> int:
     payload = [{k: v for k, v in r.items() if not k.startswith("_")}
                for r in rows]
     try:
-        updated = upsert_satellite_attribution(payload)
+        # GCAT may FILL launch_date and may not OVERRULE it.
+        #
+        # 004 rates SATCAT 1.0 and GCAT 0.95, and the write path is
+        # last-writer-wins, which knows nothing about that ordering. The
+        # 2026-09-14 survey found 66 rows where the two disagree -- all of
+        # them +/-1 day, launches straddling midnight UTC -- so without
+        # this the less-trusted source would silently overrule the more
+        # trusted one on the only column where they conflict.
+        #
+        # Every other column stays overwritable, deliberately. `operator`
+        # in particular NEEDS to overwrite: the 2,772 differences there
+        # are this repository's own transliterated-name fix landing.
+        updated = upsert_satellite_attribution(
+            payload, fill_only=("launch_date",))
     except Exception as exc:
         # Logging the failure must never replace the failure. On
         # 2026-09-12 a bad run_id made this handler raise, and the UUID

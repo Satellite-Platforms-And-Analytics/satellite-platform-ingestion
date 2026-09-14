@@ -153,3 +153,59 @@ def test_the_affected_path_pages_and_sums():
     src = inspect.getsource(writer._bulk_upsert)
     assert "affected += max(cur.rowcount, 0)" in src
     assert "for i in range(0, len(rows), page_size)" in src
+
+
+# ── fill_only ─────────────────────────────────────────────────────────────
+#
+# Added 2026-09-14. The default write is COALESCE(v.c, s.c) -- incoming
+# wins -- which is last-writer-wins and has no idea 004 rated SATCAT 1.0
+# and GCAT 0.95. `fill_only` inverts the COALESCE for named columns so a
+# secondary source can fill a gap without overruling a better source.
+#
+# These assertions are about the generated SQL, not about a database,
+# because the direction of a COALESCE is exactly the kind of thing that
+# reads correctly and behaves backwards.
+
+def test_fill_only_inverts_the_coalesce_for_named_columns():
+    sql = writer._attribution_sql(frozenset({"launch_date"}))
+    assert "launch_date = COALESCE(s.launch_date, v.launch_date)" in sql, (
+        "a fill_only column must keep the EXISTING value: "
+        "COALESCE(existing, incoming)")
+
+
+def test_fill_only_leaves_every_other_column_overwritable():
+    sql = writer._attribution_sql(frozenset({"launch_date"}))
+    for col in writer._ATTRIBUTION_DESCRIPTIVE:
+        if col == "launch_date":
+            continue
+        assert f"{col} = COALESCE(v.{col}, s.{col})" in sql, (
+            f"{col} should still be overwritable; fill_only must not leak. "
+            "operator in particular has to overwrite -- the 2,772 "
+            "differences there are the transliterated-name fix.")
+
+
+def test_the_default_sql_overwrites_everything_descriptive():
+    """The behaviour every other caller still gets."""
+    for col in writer._ATTRIBUTION_DESCRIPTIVE:
+        assert (f"{col} = COALESCE(v.{col}, s.{col})"
+                in writer._UPDATE_ATTRIBUTION_SQL)
+
+
+def test_a_misspelled_fill_only_column_is_rejected():
+    """
+    A typo would silently do nothing -- the column would keep overwriting
+    and the guard would look like it was applied. Loud is the only safe
+    behaviour for a rule nobody can see working.
+    """
+    with pytest.raises(ValueError, match="not descriptive attribution"):
+        writer._attribution_sql(frozenset({"lauch_date"}))
+
+
+def test_provenance_is_never_fill_only():
+    """
+    Provenance describes THIS pass. Making it fill-only would preserve an
+    older source name on a row this pass just rewrote -- the exact
+    misreporting 004 exists to prevent.
+    """
+    with pytest.raises(ValueError):
+        writer._attribution_sql(frozenset({"data_source"}))
