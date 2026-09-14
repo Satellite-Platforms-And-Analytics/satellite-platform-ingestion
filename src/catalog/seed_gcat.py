@@ -319,7 +319,50 @@ def resolve_owner(code: "str | None",
 
 def build_rows(currentcat: Path, orgs: dict) -> tuple:
     """
-    Returns (rows, stats). One row per GCAT record with a numeric Satcat.
+    Returns (rows, stats). **One row per NORAD id**, not per GCAT record.
+
+    NORAD IDS ARE NOT UNIQUE IN GCAT, AND THAT WAS SILENTLY CORRUPTING ROWS
+    ======================================================================
+    GCAT's key is JCAT, not Satcat. 1,944 catalogue numbers carry more than
+    one GCAT record - 3,735 extra rows - because NORAD issues one number to
+    a payload and GCAT tracks the payload, its rocket stages and attached
+    pieces separately:
+
+        norad 41847   S41847  KCHT    KS-1Q                  <- the satellite
+                      A08476  CASC    CZ-11 Y2 Stage 4       <- a rocket stage
+                      A08477  DFHZ    Fengtai shaonian yi hao
+
+    Every one of those rows went into `UPDATE ... FROM (VALUES %s)`, where
+    Postgres picks an arbitrary matching row when the join is ambiguous. So
+    for up to 1,944 objects the operator written was whichever record
+    Postgres happened to reach - and for 41847 the value stored was CASC,
+    the owner of the *fourth stage of the launch vehicle*, not KCHT who
+    owns the satellite.
+
+    It was invisible. Those columns had no prior value to disagree with, so
+    the survey reported them as GAINS. The survey's own warning said this
+    would happen - "operator/orbit_type would be written from the wrong
+    satellite, silently, because those columns have no existing value to
+    disagree with" - and it was written about a join fault, which is
+    exactly what this is, arriving from a direction nobody looked.
+
+    Found 2026-09-14 because two rows refused to converge across
+    consecutive runs: a re-import that changes its mind is a re-import
+    whose input is ambiguous.
+
+    THE RULE, AND WHY IT IS SAFE
+    ============================
+    Prefer the record whose JCAT starts with 'S' - GCAT's satellite
+    catalogue. Measured over the whole file rather than assumed:
+
+        JCAT prefixes           S 70,950   A 11,907   T 13
+        duplicated NORAD ids    1,944
+        ...with exactly one S   1,944  (all of them)
+        A-records' Type         R1 / R2 / R4 - rocket stages
+
+    The rule is total and unambiguous on this data. It is still asserted
+    at runtime rather than trusted, because "all of them" is a property of
+    today's file.
 
     Whether a row matches anything in `satellites` is the database's
     business - upsert_satellite_attribution is UPDATE-only, so a GCAT
@@ -363,6 +406,10 @@ def build_rows(currentcat: Path, orgs: dict) -> tuple:
             # is, rather than leaving a date gap to be theorised about.
             "_gcat_name": _clean(rec["Name"]),
             "_gcat_piece": _clean(rec["Piece"]),
+            # GCAT's real primary key. Carried so one NORAD id's several
+            # records can be collapsed to the satellite one - see
+            # _one_row_per_object.
+            "_gcat_jcat": _clean(rec["JCAT"]),
             "operator": operator,
             # The exact key to organizations(code). Written alongside the
             # name rather than instead of it: a page renders a name, a
@@ -407,8 +454,47 @@ def build_rows(currentcat: Path, orgs: dict) -> tuple:
             "source_confidence": GCAT_CONFIDENCE,
             "matched_at": now,
         })
+    st["rows_before_dedupe"] = len(rows)
+    rows = _one_row_per_object(rows, st)
     st["rows"] = len(rows)
     return rows, st, unresolved
+
+
+def _one_row_per_object(rows: list, st: Counter) -> list:
+    """
+    Collapse GCAT's several records per NORAD id to the satellite one.
+
+    See build_rows' docstring for why this exists. The choice is recorded
+    in `st` rather than made quietly: a dedupe that drops thousands of
+    rows without saying so is indistinguishable from a parser bug.
+    """
+    by_id: dict = {}
+    for r in rows:
+        by_id.setdefault(r["norad_id"], []).append(r)
+
+    out = []
+    for norad, group in by_id.items():
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        st["ids_with_multiple_gcat_records"] += 1
+        sats = [g for g in group if (g.get("_gcat_jcat") or "").startswith("S")]
+        if len(sats) == 1:
+            st["resolved_by_S_record"] += 1
+            out.append(sats[0])
+        elif not sats:
+            # No satellite record at all: keep the first and say so. Not
+            # silently dropping the object, not silently guessing either.
+            st["ids_with_no_S_record"] += 1
+            out.append(group[0])
+        else:
+            # Measured impossible on the 2026-09-14 file. If GCAT ever
+            # ships two satellite records under one catalogue number the
+            # rule stops being total, and that must surface as a number in
+            # the report rather than as an arbitrary pick.
+            st["ids_with_several_S_records"] += 1
+            out.append(sats[0])
+    return out
 
 
 def survey(conn, rows: list) -> None:
@@ -626,7 +712,18 @@ def main(argv=None) -> int:
     print(f"  records read               : {st['read']:,}")
     print(f"  no catalogue number        : {st['no_catalogue_number']:,}"
           f"  (cannot join)")
-    print(f"  usable rows                : {st['rows']:,}")
+    print(f"  records with a NORAD id    : {st['rows_before_dedupe']:,}")
+    print(f"  ...NORAD ids with several  : {st['ids_with_multiple_gcat_records']:,}"
+          f"  (payload + its rocket stages)")
+    print(f"  ...resolved to the S record: {st['resolved_by_S_record']:,}")
+    if st["ids_with_no_S_record"]:
+        print(f"  ...NO satellite record     : {st['ids_with_no_S_record']:,}"
+              f"  <- first record kept, check these")
+    if st["ids_with_several_S_records"]:
+        print(f"  ...SEVERAL S records       : "
+              f"{st['ids_with_several_S_records']:,}"
+              f"  <- the rule is no longer total, investigate")
+    print(f"  usable rows (one per object): {st['rows']:,}")
     print(f"  with an operator name      : {st['operator']:,}")
     print(f"  with an orbit_type         : {st['orbit_type']:,}")
     print(f"  owner resolved exactly     : {st['owner_exact']:,}")
