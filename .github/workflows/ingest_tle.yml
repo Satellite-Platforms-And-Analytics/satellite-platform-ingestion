@@ -112,7 +112,7 @@ jobs:
       - name: Install fetcher.py + writer.py dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --require-hashes -r requirements.lock
 
       - name: Run fetcher.py (dry run)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}

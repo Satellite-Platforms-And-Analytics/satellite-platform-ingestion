@@ -105,7 +105,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
+          pip install --require-hashes -r requirements-dev.lock
 
       - name: Verify the schema is present
         # Fail here with a clear message rather than letting the guard
