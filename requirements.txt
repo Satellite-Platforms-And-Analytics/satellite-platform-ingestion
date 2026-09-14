@@ -28,7 +28,7 @@
 requests>=2.31.0
 
 # Orbit propagation and geometry
-sgp4>=2.22
+sgp4>=2.27
 skyfield>=1.45
 numpy>=1.24
 
