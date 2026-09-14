@@ -30,7 +30,7 @@ requests>=2.31.0
 # Orbit propagation and geometry
 sgp4>=2.22
 skyfield>=1.45
-numpy>=1.24
+numpy>=2.5.3
 
 # Database
 sqlalchemy>=2.0.0
