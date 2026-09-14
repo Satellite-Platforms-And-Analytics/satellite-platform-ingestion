@@ -10,4 +10,4 @@
 #
 # Only rasterio is here. geopandas, shapely, pyproj and fiona were in the
 # root requirements.txt for months and nothing ever imported them.
-rasterio>=1.4.0
+rasterio>=1.5.1
