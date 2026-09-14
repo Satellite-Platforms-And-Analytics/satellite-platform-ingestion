@@ -457,6 +457,18 @@ def build_rows(currentcat: Path, orgs: dict) -> tuple:
     st["rows_before_dedupe"] = len(rows)
     rows = _one_row_per_object(rows, st)
     st["rows"] = len(rows)
+
+    # Recount coverage over the surviving rows.
+    #
+    # These were incremented while reading, so after the collapse the
+    # report said "usable rows 70,324 / with an operator name 74,059" --
+    # more operators than objects. Nothing downstream used the number, but
+    # a report that contradicts itself is exactly what this file has spent
+    # two days correcting, and a reader has no way to tell which of the two
+    # figures is the one that matters.
+    st["operator"] = sum(1 for r in rows if r["operator"])
+    st["operator_code"] = sum(1 for r in rows if r["operator_code"])
+    st["orbit_type"] = sum(1 for r in rows if r["orbit_type"])
     return rows, st, unresolved
 
 
@@ -526,7 +538,7 @@ def survey(conn, rows: list) -> None:
          WHERE norad_id = ANY(:ids)
     """), {"ids": ids}))
 
-    print(f"  GCAT records with a catalogue number : {len(rows):,}")
+    print(f"  GCAT objects (after the collapse)    : {len(rows):,}")
     print(f"  of those, tracked here               : {len(existing):,}")
 
     cols = ("operator", "operator_code", "orbit_type", "launch_date")
@@ -725,6 +737,7 @@ def main(argv=None) -> int:
               f"  <- the rule is no longer total, investigate")
     print(f"  usable rows (one per object): {st['rows']:,}")
     print(f"  with an operator name      : {st['operator']:,}")
+    print(f"  with an operator code      : {st['operator_code']:,}")
     print(f"  with an orbit_type         : {st['orbit_type']:,}")
     print(f"  owner resolved exactly     : {st['owner_exact']:,}")
     print(f"  ...after stripping '?'     : {st['owner_uncertain']:,}")
