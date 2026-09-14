@@ -56,6 +56,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  # A dependency vulnerability appears without anyone touching this
+  # repository. A scan that only runs on push can therefore never find
+  # one: the disclosure is the event, and there is no commit attached to
+  # it. Mondays, 07:11 UTC.
+  schedule:
+    - cron: "11 7 * * 1"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -122,3 +128,50 @@ jobs:
         run: |
           echo "✅ Suite passed, including the schema drift guard against" \
                "001_core_schema.sql." >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Dependency vulnerabilities ──────────────────────────────────────
+  #
+  # WHY THIS IS ITS OWN JOB AND WHY IT IS ALLOWED TO FAIL
+  # =====================================================
+  # The security baseline's rule is that a finding gets a check that can
+  # go red, not a note. So this job fails when pip-audit reports a known
+  # vulnerability -- the run goes red and is visible.
+  #
+  # It is deliberately a separate job from `test`, so a CVE disclosed
+  # upstream, in something nobody here changed, makes the run red without
+  # making the test result unreadable. The two answers "the code is
+  # broken" and "a dependency has a new advisory" should not arrive as one
+  # signal.
+  #
+  # It is honest about what it can and cannot see. Requirements are
+  # declared as `>=` ranges with no lockfile (AD-064), so this audits
+  # whatever pip resolves *today*. That is the same set the scheduled
+  # pipelines install, which is the point -- but it also means a clean run
+  # is a statement about this morning, not about what ran last week.
+  # Locking and hashing is what turns that into a durable answer.
+  #
+  # rasterio is excluded: requirements-imagery.txt needs GDAL, no
+  # scheduled job installs it, and making the security scan depend on a
+  # native build is how a security scan ends up permanently skipped.
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip pip-audit
+
+      - name: Audit declared dependencies
+        run: |
+          pip-audit --progress-spinner off \
+            -r requirements.txt \
+            -r requirements-dev.txt \
+            -r requirements-archive.txt \
+            -r requirements-tracking.txt

@@ -1,0 +1,40 @@
+# Dependency updates.
+#
+# WHY IT IS HERE
+# ==============
+# The security baseline (2026-09-13) records that dependencies are
+# declared as `>=` ranges with no lockfile, so every scheduled run
+# installs whatever pip resolves that morning -- in jobs that hold
+# DATABASE_URL. Locking and hashing (AD-064) is the real fix. This is the
+# other half: something that tells us when a pin *should* move, instead of
+# finding out by reading an advisory months later.
+#
+# Weekly, not daily. A pull request nobody reads is not a security
+# control, and this is a solo project.
+version: 2
+updates:
+  # GitHub Actions are pinned to major tags (actions/checkout@v7), which
+  # is defensible for first-party actions but means a moved tag is
+  # invisible. Dependabot at least surfaces the real version changes.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps"
+    # requirements.txt is what every scheduled workflow installs, so a
+    # change here reaches production the next time a cron fires. Group the
+    # noise; keep the security updates individually visible.
+    groups:
+      dev-and-optional:
+        patterns: ["pytest*", "ruff", "mypy", "pandas", "pyarrow",
+                   "openpyxl", "tqdm", "psutil"]
