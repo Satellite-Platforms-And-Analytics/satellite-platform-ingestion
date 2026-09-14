@@ -51,6 +51,32 @@ import os
 
 import pytest
 
+# Load .env before reading DATABASE_URL.
+#
+# THIS LINE IS A BUG FIX, AND THE BUG WAS ALREADY DOCUMENTED
+# ==========================================================
+# Without it, `pytest tests/test_db_privileges.py` reported "DATABASE_URL
+# is not set" on a workstation where DATABASE_URL is plainly sitting in
+# .env — while `pytest` over the whole suite worked. The difference is
+# import order: test_satcat.py imports src/catalog/seed_satcat.py, which
+# calls load_env() at import time, so by the time this module ran the
+# environment had been populated as a side effect of an unrelated test.
+#
+# A security control whose result depends on which tests ran before it is
+# not a control, and "DATABASE_URL is not set" when it is set is the worst
+# possible message: it sends you to look at the wrong thing.
+#
+# src/env.py exists precisely for this. Its docstring describes this exact
+# failure, observed 2026-09-04. It was written, and then this entry point
+# was added on 2026-09-13 without calling it.
+#
+# The project's own rule from 09-12 — read the file in the repo about the
+# thing before writing the thing — applies to its own modules, not only to
+# data sources.
+from src.env import bootstrap
+
+bootstrap()
+
 REQUIRE_DB = bool(os.environ.get("REQUIRE_DB"))
 
 #: The roles PostgREST assumes on behalf of the public internet. Anything
@@ -66,8 +92,9 @@ ALLOWED = {"SELECT"}
 def _connect():
     url = os.environ.get("DATABASE_URL")
     if not url:
-        msg = ("DATABASE_URL is not set, so the live privilege state "
-               "cannot be checked")
+        msg = ("DATABASE_URL is not set in the environment and was not "
+               "found in .env, so the live privilege state cannot be "
+               "checked")
         if REQUIRE_DB:
             pytest.fail(msg + " — REQUIRE_DB is set.")
         pytest.skip(msg)
@@ -91,13 +118,24 @@ def conn():
     should be reachable.
     """
     engine = _connect()
+
+    # The failure is captured and acted on *outside* the except block, so
+    # the reported result is the sentence rather than a psycopg2 traceback
+    # with the sentence buried under it. A security check that is hard to
+    # read is a security check that gets skimmed.
+    c = None
+    problem = None
     try:
         c = engine.connect()
     except Exception as exc:                                # noqa: BLE001
-        msg = f"DATABASE_URL is set but unreachable: {str(exc).splitlines()[0][:160]}"
+        problem = str(exc).splitlines()[0][:160]
+
+    if problem is not None:
+        msg = f"DATABASE_URL is set but unreachable: {problem}"
         if REQUIRE_DB:
             pytest.fail(msg + " — REQUIRE_DB is set.")
         pytest.skip(msg)
+
     try:
         yield c
     finally:
