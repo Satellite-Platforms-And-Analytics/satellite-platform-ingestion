@@ -170,23 +170,50 @@ class Client:
 
             hint = ""
             if r.status_code == 403:
-                hint = (
-                    "\n\n  403 from api.data.gov is almost always the key, "
-                    "not the path.\n"
-                    "    - API_KEY_INVALID   : the key is wrong or "
-                    "mistyped\n"
-                    "    - API_KEY_MISSING   : the value came through "
-                    "empty\n"
-                    "    - API_KEY_DISABLED / _UNAUTHORIZED : registered "
-                    "but not usable yet\n\n"
-                    "  Check it arrived intact:\n"
-                    "    python -c \"import os;k=os.environ.get("
-                    "'NASA_API_KEY','');print(len(k), k[:4]+'...'+k[-4:] "
-                    "if k else 'EMPTY')\"\n"
-                    "  An api.nasa.gov key is 40 characters. If the "
-                    "length is wrong the paste was truncated;\n"
-                    "  if it is 0 the shell variable did not reach "
-                    "python.")
+                # WHICH LAYER SAID NO IS THE WHOLE QUESTION, AND THE BODY
+                # ANSWERS IT.
+                #
+                # api.data.gov rejects a key with a JSON body naming the
+                # exact fault. Anything in front of it - a WAF, the origin
+                # - rejects with Apache's HTML page. The first version of
+                # this hint asserted "almost always the key" for both, and
+                # on 2026-09-14 the very first real 403 came back as
+                # Apache HTML: the request never reached the key check,
+                # and the hint sent the reader to inspect a key that was
+                # already known to be well formed.
+                #
+                # An error path that confidently mis-attributes is worse
+                # than one that says nothing, because it is believed.
+                looks_json = "application/json" in (
+                    r.headers.get("Content-Type") or "").lower()
+                if looks_json:
+                    hint = (
+                        "\n\n  This is api.data.gov's own JSON error, so "
+                        "the request reached the key check and the key "
+                        "is what was refused.\n"
+                        "    - API_KEY_INVALID   : the key is wrong or "
+                        "mistyped\n"
+                        "    - API_KEY_MISSING   : the value came through "
+                        "empty\n"
+                        "    - API_KEY_DISABLED / _UNAUTHORIZED : "
+                        "registered but not usable yet\n\n"
+                        "  Check it arrived intact, without printing it:\n"
+                        "    python -c \"import os;k=os.environ.get("
+                        "'NASA_API_KEY','');print(len(k))\"\n"
+                        "  An api.nasa.gov key is 40 characters.")
+                else:
+                    hint = (
+                        "\n\n  This is NOT api.data.gov's JSON error - it "
+                        "is an HTML page from a layer in front of it.\n"
+                        "  The request was refused BEFORE the key was "
+                        "looked at, so the key is not implicated and\n"
+                        "  checking it again will not help. Something "
+                        "about the request itself was rejected:\n"
+                        "  most often the client's User-Agent, sometimes "
+                        "the source network.\n\n"
+                        "  Isolate it - uses DEMO_KEY only, never your "
+                        "key, and spends 4 of its 30/hour:\n"
+                        "    python check_techport_403.py")
             if r.status_code == 429:
                 hint = ("\n\n  The hourly limit was reached. This should "
                         "not happen at this request count - check whether "
