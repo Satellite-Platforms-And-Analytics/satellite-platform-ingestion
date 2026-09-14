@@ -440,6 +440,13 @@ def survey(conn, rows: list) -> None:
     offered = Counter()       # GCAT has a value at all
     examples = {c: [] for c in cols}
 
+    # Keyed by column name, not by position. Adding operator_code to the
+    # SELECT on 2026-09-14 broke _characterise_date_disagreements, which
+    # unpacked these rows as 4-tuples — a failure that arrives as
+    # "too many values to unpack" several screens below the change that
+    # caused it. `cols` is now the single definition of what a row holds.
+    existing_by_id = {r[0]: dict(zip(cols, r[1:])) for r in existing}
+
     for norad, *vals in existing:
         g = by_id[norad]
         for col, have in zip(cols, vals):
@@ -489,10 +496,10 @@ def survey(conn, rows: list) -> None:
             for norad, have, want in examples[col]:
                 print(f"    {norad:>7}  {have!s:<24} {want}")
 
-    _characterise_date_disagreements(existing, by_id, conn)
+    _characterise_date_disagreements(existing_by_id, by_id, conn)
 
 
-def _characterise_date_disagreements(existing, by_id, conn=None) -> None:
+def _characterise_date_disagreements(existing_by_id, by_id, conn=None) -> None:
     """
     How far apart are the two catalogues, and over how many launches?
 
@@ -513,7 +520,8 @@ def _characterise_date_disagreements(existing, by_id, conn=None) -> None:
     _db_names = {}
     deltas = Counter()
     per_delta_ids = {}
-    for norad, _operator, _orbit, have in existing:
+    for norad, row in existing_by_id.items():
+        have = row["launch_date"]
         want = by_id[norad]["launch_date"]
         if have is None or want is None or have == want:
             continue
@@ -549,8 +557,8 @@ def _characterise_date_disagreements(existing, by_id, conn=None) -> None:
         for d in sorted(far):
             for norad in sorted(far[d]):
                 g = by_id[norad]
-                ours = next((r for r in existing if r[0] == norad), None)
-                print(f"    {norad:>7}  {ours[3]!s:<11} "
+                ours = existing_by_id.get(norad) or {}
+                print(f"    {norad:>7}  {ours.get('launch_date')!s:<11} "
                       f"{g['launch_date']!s:<11} {d:>+8}")
                 print(f"             {(_db_names.get(norad) or '?')[:34]:<34} "
                       f"| {(g['_gcat_name'] or '?')[:26]:<26} "
