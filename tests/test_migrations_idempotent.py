@@ -48,6 +48,15 @@ IDEMPOTENT = re.compile(
     r"|CREATE\s+OR\s+REPLACE\s+(FUNCTION|VIEW|PROCEDURE|TRIGGER)"
     r"|ALTER\s+TABLE\s+\w+\s+(ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS"
     r"|ENABLE\s+ROW|DISABLE\s+ROW)"
+    # `ALTER VIEW <name> SET (option = value)` sets a reloption to a
+    # value. Re-applying sets the same value again and succeeds - there is
+    # no "already set" error to hit, the same way ENABLE ROW LEVEL
+    # SECURITY has none. Added 2026-09-14 for 010's security_invoker.
+    #
+    # Deliberately anchored on `SET (`: the reloptions form only. It does
+    # not admit `ALTER VIEW x SET SCHEMA y` or a column default, which are
+    # different statements with different re-application behaviour.
+    r"|ALTER\s+VIEW\s+\w+\s+SET\s+\("
     r"|ALTER\s+DEFAULT\s+PRIVILEGES"
     r"|DROP\s+\w+(\s+\w+)?\s+IF\s+EXISTS"
     r"|COMMENT\s+ON|GRANT|REVOKE)", re.I | re.S)

@@ -35,6 +35,21 @@ WHAT IT ASSERTS
 3. Every table readable by `anon` has at least one policy. RLS with no
    policy is deny-all, which is safe but silent: it is how a table can
    look published and return zero rows forever.
+4. Every view runs with `security_invoker = true`.
+
+Assertion 4 was added 2026-09-14, after assertion 2 failed on its first
+live run and the investigation found three views that no audit in this
+project had ever looked at. Every privilege scan written here had matched
+`CREATE TABLE`, and assertion 1 filters to `relkind = 'r'`, so
+`active_satellites`, `satellites_by_country` and `ingestion_status` were
+invisible to all of it.
+
+A view runs with its **owner's** privileges unless declared
+`security_invoker = true`, which means an owner-rights view hands back
+rows that row-level security would have refused the caller. That is not
+hypothetical for `ingestion_status`: it selects `message` out of
+`ingestion_log`, a deny-all table, and `message` holds exception text that
+can contain the database host or a failing statement.
 
 SKIPPING IS NOT PASSING
 =======================
@@ -206,4 +221,45 @@ def test_readable_tables_have_a_policy(conn):
         "returns zero rows to every public reader: " + ", ".join(silent)
         + ".\nEither add the policy or drop the grant — a grant that "
           "cannot be exercised is a claim the schema does not honour."
+    )
+
+
+def test_views_run_with_the_callers_privileges(conn):
+    """
+    An owner-rights view is a hole with a polite name.
+
+    `security_invoker = false` is PostgreSQL's default, so this is not a
+    mistake anyone made - it is what happens when nobody states otherwise.
+    The consequence is that RLS on the underlying tables does not protect
+    the view's output, and the only thing standing between a deny-all
+    table and a public reader is the absence of a GRANT on the view.
+
+    That absence is one convenient `GRANT SELECT` away from being gone,
+    and the request that produces it - "can we show ingestion status on a
+    page?" - is entirely reasonable. This test is what makes that grant
+    safe instead of silently catastrophic.
+
+    Fixed by 010_revoke_authenticated_and_seal_views.sql; this fails until
+    that migration is applied, which is the point of it.
+    """
+    from sqlalchemy import text
+    rows = list(conn.execute(text("""
+        SELECT c.relname,
+               COALESCE(
+                   (SELECT o FROM unnest(c.reloptions) o
+                     WHERE o LIKE 'security_invoker=%'),
+                   'unset (defaults to false)') AS invoker
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind IN ('v', 'm')
+         ORDER BY c.relname
+    """)))
+    owner_rights = [name for name, inv in rows if "true" not in inv.lower()]
+    assert not owner_rights, (
+        "these views run with their owner's privileges, so row-level "
+        "security on the tables beneath them does not apply to what they "
+        "return: " + ", ".join(owner_rights)
+        + "\n\nAdd `ALTER VIEW <name> SET (security_invoker = true);` to the "
+          "migration that creates the view. See "
+          "010_revoke_authenticated_and_seal_views.sql."
     )

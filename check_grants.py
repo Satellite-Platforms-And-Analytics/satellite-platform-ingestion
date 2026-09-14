@@ -112,8 +112,13 @@ def can_anon_actually_read(conn, relations) -> None:
     print("\n  WHAT anon CAN ACTUALLY READ (SET ROLE, then rolled back)")
     print(f"  {'relation':<26}rows visible to anon")
     print("  " + "-" * 74)
+    # SQLAlchemy 2.0 autobegins a transaction on the first execute(), so
+    # conn.begin() raises "already initialized a Transaction". Roll back
+    # first, let the next execute() open a fresh one, and roll that back
+    # too. SET LOCAL needs a transaction to be local to, which the
+    # autobegin provides. (Found by running this, 2026-09-14.)
     for rel in relations:
-        trans = conn.begin()
+        conn.rollback()
         try:
             conn.execute(text("SET LOCAL ROLE anon"))
             n = conn.execute(text(f"SELECT count(*) FROM {rel}")).scalar_one()
@@ -122,9 +127,9 @@ def can_anon_actually_read(conn, relations) -> None:
                 note = "   <-- RLS says deny-all; this is a bypass"
             print(f"  {rel:<26}{n}{note}")
         except Exception as exc:                             # noqa: BLE001
-            print(f"  {rel:<26}refused: {str(exc).splitlines()[0][:44]}")
+            print(f"  {rel:<26}refused: {str(exc).splitlines()[0][:52]}")
         finally:
-            trans.rollback()
+            conn.rollback()
 
 
 def main() -> int:
