@@ -38,6 +38,59 @@ barely at all for a university lab.
 writing an importer tomorrow and writing down that the edge needs a
 different source.
 
+RESULT OF RUN 1, 2026-09-14 (--sample-from head, n=50)
+======================================================
+    projects since 2020        19,690   MISSED HIGH by 2.5x
+    with a leadOrganization       64%   MISSED LOW  (predicted >90%)
+    with a usable trlCurrent      30%   MISSED LOW  (predicted 50-70%)
+    with a primaryTx              56%   MISSED LOW  (predicted >80%)
+    DISTINCT orgs matching     3/21 = 14%   just under the 15-35% band
+
+Four predictions out of five wrong, and all four of the coverage ones
+wrong in the same direction: TechPort is far emptier, field by field,
+than assumed. That consistency is itself the finding - the error was not
+noise, it was a wrong model of what a TechPort record contains.
+
+The unmatched list is what actually decides it, and it reads clearly:
+Johnson, Kennedy, Ames, Armstrong, JPL - NASA field centres - alongside
+Interlune, Thinkorbital, CoolCAD, CFD Research, A10 Systems: SBIR-stage
+firms that have never operated a spacecraft. GCAT has no reason to name
+any of them. **TechPort names who does the R&D; GCAT names who operates
+the hardware.** They are different populations, and the 14% is not a
+matching defect to be tuned away.
+
+Note what loosening the rule buys: the two extra matches from stripping
+an agency prefix were LARCN (Langley) and MSFC (Marshall) - both NASA
+centres. The relaxed rule adds ten points of match rate and almost no
+commercial organisations, which is the opposite of what the readiness
+story needs.
+
+PREDICTIONS FOR RUN 2, WRITTEN BEFORE RUNNING IT
+================================================
+Run 1 had two defects of method, both now fixed, and both of which make
+its headline number untrustworthy in a *knowable* direction:
+
+  1. It reported three marginal percentages and left the reader to
+     multiply them. An edge needs a matched org AND a TRL AND a taxonomy
+     node ON THE SAME PROJECT, and multiplying marginals assumes an
+     independence nobody checked.
+  2. It took `ids[:50]`. The listing is ordered by lastUpdated
+     descending, so that is the 50 most recently touched projects -
+     which skews hard toward exactly the SBIR awards that cannot match.
+     The most adversarial slice available, reported as a property of
+     TechPort.
+
+    joint org+TRL+tx on one project (head)   8 - 20%
+    ... and org matches strictly (head)      0 - 6%   i.e. 0-3 of 50
+    DISTINCT org match, --sample-from spread 20 - 40%
+        (higher than head: older projects skew toward large flight
+         programmes with operators GCAT knows)
+    primaryTx nodes at TX top level          under 50%, mixed depth
+
+If the spread sample also lands in the teens, the population argument is
+confirmed and Block 2 does not get written. If it lands at 35%+, run 1
+measured its own sampling and not TechPort.
+
 RATE LIMITS ARE OBEYED, NOT ASSUMED (AD-060)
 ============================================
 Through `api.nasa.gov`, which publishes 1,000 requests/hour per key and
@@ -304,6 +357,13 @@ def main(argv=None) -> int:
                     help="Project details to fetch (default 50).")
     ap.add_argument("--since", default="2020-01-01",
                     help="updatedSince date (default 2020-01-01).")
+    ap.add_argument("--sample-from", choices=("spread", "head", "tail"),
+                    default="spread",
+                    help="Which projects to sample. 'spread' takes them "
+                         "evenly across the whole listing (default); "
+                         "'head' takes the most recently updated, which "
+                         "is what the first survey did and is the most "
+                         "adversarial slice; 'tail' the least recently.")
     args = ap.parse_args(argv)
 
     c = Client(_key())
@@ -338,14 +398,37 @@ def main(argv=None) -> int:
     print(f"  projects returned            : {len(ids):,}")
     print(f"  quota remaining              : {c.remaining}")
 
-    take = ids[: args.sample]
+    # HOW THE SAMPLE IS DRAWN IS PART OF THE RESULT.
+    #
+    # The first survey took ids[:50] and reported a 14% organisation
+    # match as though it were a property of TechPort. The listing comes
+    # back ordered by lastUpdated descending, so those 50 were the 50
+    # most recently touched projects - which skews hard toward active
+    # SBIR/STTR awards to small firms that have never operated a
+    # spacecraft and that GCAT therefore has no reason to name. That is
+    # the single most adversarial slice available for this particular
+    # question, and nothing in the output said so.
+    #
+    # 'spread' walks the whole listing at a fixed stride for the same
+    # number of requests. It is not a random sample - it is a systematic
+    # one - but it is not concentrated in one edge of the distribution.
+    n_ids = len(ids)
+    if args.sample >= n_ids or args.sample_from == "head":
+        take = ids[: args.sample]
+    elif args.sample_from == "tail":
+        take = ids[-args.sample:]
+    else:
+        stride = n_ids / args.sample
+        take = [ids[int(k * stride)] for k in range(args.sample)]
+    print(f"  sampling                     : {args.sample_from} "
+          f"({len(take)} of {n_ids:,}"
+          + (f", stride {n_ids / args.sample:.0f}"
+             if args.sample_from == "spread" and args.sample < n_ids
+             else "") + ")")
     print(f"\n  fetching {len(take)} project details "
           f"({PAUSE_S}s apart) ...")
 
-    have_org = have_trl = have_tx = 0
-    org_names: collections.Counter = collections.Counter()
-    tx_names: collections.Counter = collections.Counter()
-    trls: collections.Counter = collections.Counter()
+    records: list[dict] = []
     detail_shape: collections.Counter = collections.Counter()
 
     for n, pid in enumerate(take, 1):
@@ -355,34 +438,46 @@ def main(argv=None) -> int:
             detail_shape[k] += 1
 
         lead = p.get("leadOrganization") or {}
-        lead_name = lead.get("organizationName") if isinstance(lead, dict) else lead
-        if lead_name:
-            have_org += 1
-            org_names[str(lead_name).strip()] += 1
+        lead_name = (lead.get("organizationName")
+                     if isinstance(lead, dict) else lead)
+        lead_name = str(lead_name).strip() if lead_name else None
 
         trl = p.get("trlCurrent")
-        if isinstance(trl, (int, float)) and trl:
-            have_trl += 1
-            trls[int(trl)] += 1
+        trl = int(trl) if isinstance(trl, (int, float)) and trl else None
 
+        # KEEP THE CODE, NOT ONLY THE TITLE.
+        #
+        # The first version took node["title"] and dropped everything
+        # else, which made "are these nodes at the same depth?" -
+        # the question that decides whether they can be grouped at all -
+        # unanswerable from the survey's own output. TX08 and
+        # TX08.2.4.3 are both titles; only the code says which is which.
+        tx_pairs = []
         tx = p.get("primaryTaxonomyNodes") or p.get("primaryTx")
-        if tx:
-            have_tx += 1
-            if isinstance(tx, list):
-                for node in tx:
-                    label = (node.get("title") if isinstance(node, dict)
-                             else str(node))
-                    if label:
-                        tx_names[label] += 1
-            elif isinstance(tx, dict):
-                label = tx.get("title")
-                if label:
-                    tx_names[label] += 1
+        nodes = tx if isinstance(tx, list) else ([tx] if tx else [])
+        for node in nodes:
+            if isinstance(node, dict):
+                code = (node.get("code") or node.get("taxonomyNumber")
+                        or node.get("number") or "")
+                title = node.get("title") or ""
+            else:
+                code, title = "", str(node)
+            if title or code:
+                tx_pairs.append((str(code).strip(), str(title).strip()))
+
+        records.append({"id": pid, "org": lead_name, "trl": trl,
+                        "tx": tx_pairs})
         if n % 10 == 0:
             print(f"    {n}/{len(take)}   quota {c.remaining}")
 
-    s = len(take) or 1
-    print(f"\n  FIELD COVERAGE over {s} projects")
+    s = len(records) or 1
+    have_org = sum(1 for r in records if r["org"])
+    have_trl = sum(1 for r in records if r["trl"])
+    have_tx = sum(1 for r in records if r["tx"])
+    trls = collections.Counter(r["trl"] for r in records if r["trl"])
+    org_names = collections.Counter(r["org"] for r in records if r["org"])
+
+    print(f"\n  FIELD COVERAGE over {s} projects  [sample: {args.sample_from}]")
     print(f"    leadOrganization           : {have_org} ({100*have_org/s:.0f}%)")
     print(f"    trlCurrent                 : {have_trl} ({100*have_trl/s:.0f}%)")
     print(f"    a primary taxonomy node    : {have_tx} ({100*have_tx/s:.0f}%)")
@@ -395,18 +490,31 @@ def main(argv=None) -> int:
     with engine.connect() as conn:
         strict_idx, relaxed_idx = load_org_index(conn)
 
+    def match(name):
+        """-> (code, how) where how is 'strict' | 'relaxed' | None."""
+        if not name:
+            return None, None
+        code = strict_idx.get(norm(name))
+        if code:
+            return code, "strict"
+        code = relaxed_idx.get(norm_relaxed(name))
+        if code:
+            return code, "relaxed"
+        return None, None
+
+    for r in records:
+        r["code"], r["how"] = match(r["org"])
+
     print(f"\n  ORGANISATION JOIN  (predicted 15-35% of distinct names)")
     print(f"    names indexed, strict      : {len(strict_idx):,}")
     print(f"    distinct TechPort leads    : {len(org_names):,}")
 
     matched, by_relaxed, unmatched = {}, {}, []
     for name, count in org_names.items():
-        code = strict_idx.get(norm(name))
-        if code:
+        code, how = match(name)
+        if how == "strict":
             matched[name] = (code, count)
-            continue
-        code = relaxed_idx.get(norm_relaxed(name))
-        if code:
+        elif how == "relaxed":
             by_relaxed[name] = (code, count)
         else:
             unmatched.append((name, count))
@@ -443,15 +551,82 @@ def main(argv=None) -> int:
         for name, cnt in sorted(unmatched, key=lambda kv: -kv[1])[:12]:
             print(f"      {'':<10}{cnt:>4}  {name[:52]}")
 
+    # ── WHAT AN EDGE ACTUALLY NEEDS: ALL THREE AT ONCE ───────────────
+    #
+    # The first survey reported three marginal percentages and left the
+    # reader to multiply them, which assumes independence nobody checked.
+    # An edge in 015 needs a matched organisation AND a TRL AND a
+    # taxonomy node ON THE SAME PROJECT. That is one number and it is
+    # the only one that decides anything.
+    def n_with(pred):
+        return sum(1 for r in records if pred(r))
+
+    strict_ok = n_with(lambda r: r["how"] == "strict")
+    any_ok = n_with(lambda r: r["how"] in ("strict", "relaxed"))
+    usable_strict = n_with(lambda r: r["how"] == "strict" and r["trl"]
+                           and r["tx"])
+    usable_any = n_with(lambda r: r["how"] in ("strict", "relaxed")
+                        and r["trl"] and r["tx"])
+    all_three_any_org = n_with(lambda r: r["org"] and r["trl"] and r["tx"])
+
+    print(f"\n  JOINT COVERAGE — the number an edge table actually needs")
+    print(f"    org + TRL + taxonomy, any org name : "
+          f"{all_three_any_org}/{s} ({100*all_three_any_org/s:.0f}%)")
+    print(f"    ... and the org matches STRICTLY   : "
+          f"{usable_strict}/{s} ({100*usable_strict/s:.0f}%)")
+    print(f"    ... allowing the relaxed match too : "
+          f"{usable_any}/{s} ({100*usable_any/s:.0f}%)")
+    print(f"    (projects whose org matched at all : "
+          f"{strict_ok} strict, {any_ok} incl. relaxed)")
+    if usable_strict:
+        print("\n    the usable ones, in full:")
+        for r in records:
+            if r["how"] == "strict" and r["trl"] and r["tx"]:
+                code, title = r["tx"][0]
+                print(f"      {r['code']:<9} TRL{r['trl']:<3} "
+                      f"{(code + ' ') if code else ''}{title[:38]}")
+                print(f"      {'':<9} {r['org'][:60]}")
+
+    # ── TAXONOMY: SAME CARVE-UP, OR A DIFFERENT AXIS? ────────────────
+    tx_codes = collections.Counter()
+    tx_names = collections.Counter()
+    depths = collections.Counter()
+    for r in records:
+        for code, title in r["tx"]:
+            tx_names[title] += 1
+            if code:
+                tx_codes[code] += 1
+                depths[code.count(".") + 1] += 1
+            else:
+                depths["no code"] += 1
+
     if tx_names:
         print(f"\n  TAXONOMY — does it carve the domain like our 13?")
-        for label, cnt in tx_names.most_common(12):
-            print(f"      {cnt:>4}  {label[:60]}")
+        print(f"    node depth distribution    : {dict(depths)}")
+        print("    (1 = a TX top-level area. Anything deeper cannot be")
+        print("     grouped with a top-level one without rolling it up")
+        print("     first, and a mixed-depth column silently will not.)")
+        for (code, title), cnt in collections.Counter(
+                (c_, t_) for r in records for c_, t_ in r["tx"]
+        ).most_common(14):
+            print(f"      {cnt:>4}  {(code or '—'):<10} {title[:48]}")
+
+    if detail_shape:
+        print(f"\n  DETAIL FIELDS PRESENT (top 20 of {len(detail_shape)})")
+        print("    collected since the first survey and never printed, "
+              "which is")
+        print("    the same defect as the discarded response body:")
+        row = []
+        for k, cnt in detail_shape.most_common(20):
+            row.append(f"{k}({cnt})")
+        for k in range(0, len(row), 3):
+            print("      " + "  ".join(f"{x:<26}" for x in row[k:k + 3]))
 
     print(f"\n  requests used: {c.n}   quota remaining: {c.remaining}")
-    print("\n  Nothing was written. The prediction was 15-35% of distinct")
-    print("  names; compare before deciding whether an importer is the")
-    print("  right next step or whether this edge needs another source.")
+    print("\n  Nothing was written. Read JOINT COVERAGE, not the three")
+    print("  marginal percentages: an edge needs all three on one project,")
+    print("  and multiplying the marginals assumes an independence that")
+    print("  nobody has checked.")
     return 0
 
 
