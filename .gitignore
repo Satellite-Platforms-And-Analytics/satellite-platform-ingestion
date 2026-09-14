@@ -62,3 +62,9 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# API response caches. Regenerable, and the point of them is to avoid
+# re-requesting - not to version what was requested. data/cache/README.md
+# records what each one holds and its TTL.
+data/cache/
+!data/cache/README.md

@@ -214,6 +214,64 @@ changes monthly.
 
 ---
 
+## NASA TechPort via api.nasa.gov — keyed, metered, cached
+
+`https://api.nasa.gov/techport/api/...`, fronted by api.data.gov's API
+Umbrella. Rules below read from the api.data.gov developer manual on
+**2026-09-14**, not from memory.
+
+**Never `techport.nasa.gov` directly** (AD-060). The direct host needs no
+key and publishes no rate limit. An unmetered endpoint is not a generous
+one — it is one where you find the ceiling by hitting it, and where
+nothing tells you how close you are.
+
+### The published rules, and what we do about each
+
+| Rule as published | What enforces it here |
+|---|---|
+| **1,000 requests/hour** is the *default*; "rate limits may vary by service" | We no longer assert a number. `Client` reads `X-RateLimit-Limit` from every response and prints it. This key reports ~2,000 on TechPort, so the 1,000 in the original docstring was a guess that happened to be conservative |
+| Counters reset **on a rolling basis**, not on the clock hour | We never reason about elapsed time. `X-RateLimit-Remaining` is read from every response and is the only quantity the stop rule consults |
+| Exceeding the limit **temporarily blocks the key** | `QUOTA_FLOOR = 200`. The survey stops itself with a fifth of the budget unspent, so the block is a thing we stay clear of rather than recover from |
+| `429 OVER_RATE_LIMIT` on exhaustion | Handled and named, though the floor should mean it is never seen |
+| The key "should be kept private and should not be shared" | Passed in the **`X-Api-Key` header**, not the query string. A query parameter lands in server logs, proxy logs, `Referer`, browser history and — the one that bit us — inside `requests`' own exception messages. Never printed; `check_techport.py` reports its length and never its value |
+| Errors may arrive as **JSON, XML, CSV or HTML** | The 403 branch keys on the documented error *code* appearing in the body, not on `Content-Type`. An earlier version assumed HTML meant "not api.data.gov" and was wrong in principle even though right in that instance |
+| `API_KEY_UNVERIFIED` — registered but the confirmation email was never clicked | Listed in the 403 hint. It was missing from the first version |
+| **DEMO_KEY: 30/hour AND 50/day, per IP** | `check_techport_403.py` is DEMO_KEY-only, spends 4, prints the remaining count and warns below 10. The daily cap is the one people forget |
+| No caching rule is published | We cache anyway. `data/cache/techport/`, one file per project, 7-day TTL. See below |
+
+### Caching, though nothing requires it
+
+api.data.gov publishes a rate limit and no caching rule, so a re-run
+would be *permitted* to refetch. We cache because "we were allowed to" is
+not the standard this project works to — and because it has been on the
+wrong side of that line before, re-downloading 13,517 `gp_history`
+records for data already held. Three TechPort survey runs on 2026-09-14
+refetched the same 50 details three times before the cache existed.
+
+TTL is 7 days against records whose `lastUpdated` moves on the order of
+months, so a shorter one would spend requests to observe nothing.
+
+### Attribution
+
+NASA-produced content is generally not subject to US copyright and asks
+for **acknowledgement rather than permission** (AD-060). Anything derived
+from TechPort that reaches the product surface must name NASA TechPort as
+the source, in the same way GCAT's CC-BY credit is a condition and not a
+courtesy. **This is an open item:** no TechPort-derived data has reached
+a page yet, and the credit has to exist before any does.
+
+### Standing usage
+
+Survey-only. **Nothing is imported.** The 2026-09-14 surveys found a 3%
+strict organisation match against `organizations` and no importer was
+written, so current standing usage is ~51 requests per survey run,
+falling to near zero on a re-run once the cache is warm.
+
+**Status: low risk**, and the exposure is bounded by a floor that stops
+the run rather than by an intention to be careful.
+
+---
+
 ## UCS Satellite Database — manual download only
 
 `https://www.ucs.org/resources/satellite-database`

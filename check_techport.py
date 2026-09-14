@@ -110,6 +110,8 @@ import argparse
 import collections
 import os
 import re
+import json
+import pathlib
 import sys
 import time
 
@@ -189,15 +191,37 @@ def _key() -> str:
     return k
 
 
+#: api.data.gov's documented general error codes, verified against the
+#: developer manual 2026-09-14. Their presence in a body is what proves
+#: api.data.gov answered; their absence proves something else did.
+API_UMBRELLA_CODES = (
+    "API_KEY_MISSING", "API_KEY_INVALID", "API_KEY_DISABLED",
+    "API_KEY_UNAUTHORIZED", "API_KEY_UNVERIFIED", "HTTPS_REQUIRED",
+    "OVER_RATE_LIMIT", "NOT_FOUND",
+)
+
+
 class Client:
     def __init__(self, key: str):
         self.key = key
         self.n = 0
         self.remaining: "int | None" = None
+        self.limit: "int | None" = None
         # A Session so the identifying header cannot be forgotten on one
         # call site, and so fifty requests reuse one connection.
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
+        # THE KEY GOES IN A HEADER, NOT THE QUERY STRING.
+        #
+        # api.data.gov documents three ways to pass it and says the key
+        # "should be kept private". A query parameter is the one that
+        # does not keep it: it lands in server logs, in proxy logs, in
+        # Referer headers, in browser history, and - the one that bit
+        # this project - inside requests' own exception messages, which
+        # is why the 403 handler had to be written to suppress the URL.
+        # X-Api-Key removes the leak at its source rather than papering
+        # over each place it surfaces.
+        self.session.headers["X-Api-Key"] = key
 
     def get(self, path: str, **params):
         if self.remaining is not None and self.remaining < QUOTA_FLOOR:
@@ -205,12 +229,21 @@ class Client:
                 f"stopping: {self.remaining} requests left on this key, "
                 f"floor is {QUOTA_FLOOR}. Nothing was written; re-run in "
                 f"an hour.")
-        params["api_key"] = self.key
         r = self.session.get(f"{BASE}{path}", params=params, timeout=30)
         self.n += 1
         rem = r.headers.get("X-RateLimit-Remaining")
         if rem and rem.isdigit():
             self.remaining = int(rem)
+        # READ THE CEILING, DO NOT ASSERT IT.
+        #
+        # The manual says 1,000/hour is the DEFAULT and that "rate limits
+        # may vary by service". This key reports ~2,000 on TechPort, so
+        # the docstring's 1,000 was a guess that happened to be
+        # conservative. The server states the real number on every
+        # response; there is no reason to carry a guess alongside it.
+        lim = r.headers.get("X-RateLimit-Limit")
+        if lim and lim.isdigit():
+            self.limit = int(lim)
         if r.status_code >= 400:
             # THE SERVER'S EXPLANATION IS THE POINT OF THE ERROR.
             #
@@ -252,27 +285,46 @@ class Client:
                 #
                 # An error path that confidently mis-attributes is worse
                 # than one that says nothing, because it is believed.
-                looks_json = "application/json" in (
-                    r.headers.get("Content-Type") or "").lower()
-                if looks_json:
+                # WHICH LAYER ANSWERED IS PROVED BY THE ERROR CODE, NOT
+                # BY THE CONTENT TYPE.
+                #
+                # The first version of this branch used Content-Type, on
+                # the assumption that HTML meant "not api.data.gov". The
+                # developer manual says otherwise: api.data.gov returns
+                # its error "in JSON, XML, CSV, or HTML" depending on the
+                # detected request format, and its HTML form is
+                # <h1>API_KEY_MISSING</h1>. So HTML alone proves nothing.
+                #
+                # What distinguishes them is the documented code. The
+                # Apache page that cost 2026-09-14 carried none of them -
+                # only "You don't have permission to access this
+                # resource" - which is how we know the request never
+                # reached api.data.gov at all.
+                body_text = (r.text or "")
+                found = [c for c in API_UMBRELLA_CODES if c in body_text]
+                if found:
                     hint = (
-                        "\n\n  This is api.data.gov's own JSON error, so "
-                        "the request reached the key check and the key "
-                        "is what was refused.\n"
+                        f"\n\n  api.data.gov answered, naming "
+                        f"{', '.join(found)}. The request reached the key "
+                        f"check, so the key is what was refused.\n"
                         "    - API_KEY_INVALID   : the key is wrong or "
                         "mistyped\n"
                         "    - API_KEY_MISSING   : the value came through "
                         "empty\n"
                         "    - API_KEY_DISABLED / _UNAUTHORIZED : "
-                        "registered but not usable yet\n\n"
+                        "registered but not usable\n"
+                        "    - API_KEY_UNVERIFIED: registered and the "
+                        "confirmation email has not been clicked\n\n"
                         "  Check it arrived intact, without printing it:\n"
                         "    python -c \"import os;k=os.environ.get("
                         "'NASA_API_KEY','');print(len(k))\"\n"
                         "  An api.nasa.gov key is 40 characters.")
                 else:
                     hint = (
-                        "\n\n  This is NOT api.data.gov's JSON error - it "
-                        "is an HTML page from a layer in front of it.\n"
+                        "\n\n  This carries NONE of api.data.gov's "
+                        "documented error codes, so it did not come from "
+                        "api.data.gov.\n"
+                        "  It is a layer in front of it.\n"
                         "  The request was refused BEFORE the key was "
                         "looked at, so the key is not implicated and\n"
                         "  checking it again will not help. Something "
@@ -291,6 +343,45 @@ class Client:
                 f"  server said: {detail}{hint}")
         time.sleep(PAUSE_S)
         return r.json()
+
+
+#: One JSON file per project detail. See data/cache/README.md.
+CACHE_DIR = pathlib.Path(__file__).resolve().parent / "data" / "cache" / "techport"
+
+#: A TechPort record's lastUpdated moves on the order of months. A shorter
+#: TTL would spend requests to observe nothing.
+CACHE_TTL_S = 7 * 24 * 3600
+
+
+def cached_detail(c: "Client", pid, use_cache: bool = True):
+    """
+    Fetch one project detail, through a disk cache.
+
+    THE PROJECT HAS A REASON TO CARE ABOUT THIS. On 2026-09-05 it
+    re-downloaded 13,517 Space-Track gp_history records for data it
+    already held, against a source whose guidance is one request per
+    object per lifetime and which had previously suspended the account.
+    api.data.gov is more forgiving - it publishes a rate limit rather
+    than a caching rule - but "we were allowed to" is not the standard
+    this project agreed to work to, and three survey runs had already
+    re-fetched the same details three times before this existed.
+    """
+    f = CACHE_DIR / f"{pid}.json"
+    if use_cache and f.is_file():
+        age = time.time() - f.stat().st_mtime
+        if age < CACHE_TTL_S:
+            try:
+                return json.loads(f.read_text(encoding="utf-8")), True
+            except (OSError, ValueError):
+                pass                      # unreadable cache is not an error
+    d = c.get(f"/projects/{pid}")
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(d), encoding="utf-8")
+    except OSError:
+        pass                              # a cache we cannot write is not
+                                          # a reason to fail the survey
+    return d, False
 
 
 #: Tokens that differ between catalogues without changing the organisation.
@@ -357,6 +448,9 @@ def main(argv=None) -> int:
                     help="Project details to fetch (default 50).")
     ap.add_argument("--since", default="2020-01-01",
                     help="updatedSince date (default 2020-01-01).")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="Ignore data/cache/techport and refetch every "
+                         "detail. Costs one request per project.")
     ap.add_argument("--sample-from", choices=("spread", "head", "tail"),
                     default="spread",
                     help="Which projects to sample. 'spread' takes them "
@@ -431,8 +525,10 @@ def main(argv=None) -> int:
     records: list[dict] = []
     detail_shape: collections.Counter = collections.Counter()
 
+    from_cache = 0
     for n, pid in enumerate(take, 1):
-        d = c.get(f"/projects/{pid}")
+        d, hit = cached_detail(c, pid, use_cache=not args.no_cache)
+        from_cache += hit
         p = d.get("project", d) if isinstance(d, dict) else {}
         for k in p:
             detail_shape[k] += 1
@@ -468,7 +564,8 @@ def main(argv=None) -> int:
         records.append({"id": pid, "org": lead_name, "trl": trl,
                         "tx": tx_pairs})
         if n % 10 == 0:
-            print(f"    {n}/{len(take)}   quota {c.remaining}")
+            print(f"    {n}/{len(take)}   quota {c.remaining}"
+                  f"   cached {from_cache}")
 
     s = len(records) or 1
     have_org = sum(1 for r in records if r["org"])
@@ -622,7 +719,10 @@ def main(argv=None) -> int:
         for k in range(0, len(row), 3):
             print("      " + "  ".join(f"{x:<26}" for x in row[k:k + 3]))
 
-    print(f"\n  requests used: {c.n}   quota remaining: {c.remaining}")
+    print(f"\n  requests used: {c.n}   served from cache: {from_cache}")
+    print(f"  quota remaining: {c.remaining}"
+          + (f" of {c.limit} (the server's number, not ours)"
+             if c.limit else ""))
     print("\n  Nothing was written. Read JOINT COVERAGE, not the three")
     print("  marginal percentages: an edge needs all three on one project,")
     print("  and multiplying the marginals assumes an independence that")

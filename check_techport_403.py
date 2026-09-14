@@ -25,8 +25,21 @@ network. This script separates them.
 How it reads
 ------------
 DEMO_KEY only. Your key is never sent and never read, so nothing here can
-spend its quota or leak it. DEMO_KEY allows 30 requests/hour and this
-spends 4, which is what DEMO_KEY is documented for.
+spend its quota or leak it.
+
+DEMO_KEY's published limits are **30 requests/hour AND 50 requests/day,
+both per IP address** (api.data.gov developer manual, read 2026-09-14).
+This spends 4. The daily cap is the one worth remembering: it is not
+mentioned in most examples, it is shared with anything else on this IP
+using DEMO_KEY, and twelve runs of this script would reach it. If that
+happens the answer is to wait, not to switch to the real key - the whole
+design of this diagnostic is that the real key stays out of it.
+
+The key is passed as a query parameter here, deliberately, even though
+check_techport.py now uses the X-Api-Key header: this script's job is to
+reproduce the request that failed on 2026-09-14, and changing two
+variables at once is how a reproduction stops being one. DEMO_KEY is
+public, so there is nothing to leak.
 
   all four 403 (HTML)   -> the source network, not the client. A VPN,
                            a corporate egress, or an IP range the WAF
@@ -128,8 +141,16 @@ def main() -> int:
             print(f"  {label:30s} -> request failed: {type(exc).__name__}")
             results.append((label, None))
             continue
-        print(f"  {label:30s} -> {r.status_code}  {body_kind(r)}")
+        lim = r.headers.get("X-RateLimit-Limit")
+        rem = r.headers.get("X-RateLimit-Remaining")
+        quota = f"  [{rem}/{lim} left]" if (lim and rem) else ""
+        print(f"  {label:30s} -> {r.status_code}  {body_kind(r)}{quota}")
         results.append((label, r.status_code))
+        if rem and rem.isdigit() and int(rem) < 10:
+            print(f"       ^ DEMO_KEY is nearly spent on this IP "
+                  f"({rem} left). Wait an hour rather than reaching for")
+            print(f"         the real key - keeping it out of this "
+                  f"diagnostic is the point of the diagnostic.")
 
     ok = {label for label, code in results if code == 200}
     print()
