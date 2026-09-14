@@ -68,8 +68,19 @@ import requests                                              # noqa: E402
 from sqlalchemy import text                                  # noqa: E402
 
 from src.db.writer import get_engine                         # noqa: E402
+from src.useragent import user_agent                         # noqa: E402
 
 BASE = "https://api.nasa.gov/techport/api"
+
+#: NOT COSMETIC. api.nasa.gov's WAF refuses `python-requests/<version>`
+#: with an Apache 403, before api.data.gov ever looks at the key - which
+#: is what cost 2026-09-14. Measured: 403 with the default header, 200
+#: with this one, 19,690 projects, nothing else changed.
+#:
+#: The rate claim is one the code keeps: QUOTA_FLOOR stops the survey
+#: with 200 requests to spare, and PAUSE_S holds it well under the
+#: published ceiling.
+USER_AGENT = user_agent("technology readiness survey", "<=1000 req/hr")
 
 #: Stop if the key's remaining hourly quota falls below this. Leaves room
 #: for anything else on the same key and makes the stop a decision rather
@@ -130,6 +141,10 @@ class Client:
         self.key = key
         self.n = 0
         self.remaining: "int | None" = None
+        # A Session so the identifying header cannot be forgotten on one
+        # call site, and so fifty requests reuse one connection.
+        self.session = requests.Session()
+        self.session.headers["User-Agent"] = USER_AGENT
 
     def get(self, path: str, **params):
         if self.remaining is not None and self.remaining < QUOTA_FLOOR:
@@ -138,7 +153,7 @@ class Client:
                 f"floor is {QUOTA_FLOOR}. Nothing was written; re-run in "
                 f"an hour.")
         params["api_key"] = self.key
-        r = requests.get(f"{BASE}{path}", params=params, timeout=30)
+        r = self.session.get(f"{BASE}{path}", params=params, timeout=30)
         self.n += 1
         rem = r.headers.get("X-RateLimit-Remaining")
         if rem and rem.isdigit():
