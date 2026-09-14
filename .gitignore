@@ -66,5 +66,9 @@ Thumbs.db
 # API response caches. Regenerable, and the point of them is to avoid
 # re-requesting - not to version what was requested. data/cache/README.md
 # records what each one holds and its TTL.
-data/cache/
+# NOTE the trailing /* rather than /. git will not descend into an
+# excluded DIRECTORY, so `data/cache/` followed by a negation silently
+# keeps ignoring the README - the negation never gets considered. Caught
+# 2026-09-14 by `git add` refusing the file.
+data/cache/*
 !data/cache/README.md
