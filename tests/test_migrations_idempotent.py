@@ -59,17 +59,23 @@ IDEMPOTENT = re.compile(
     r"|ALTER\s+VIEW\s+\w+\s+SET\s+\("
     r"|ALTER\s+DEFAULT\s+PRIVILEGES"
     r"|DROP\s+\w+(\s+\w+)?\s+IF\s+EXISTS"
-    # ALTER TABLE ... DROP <thing> IF EXISTS. The pattern above only
-    # matches a statement that BEGINS with DROP, so 016's
-    # `ALTER TABLE research_organizations DROP CONSTRAINT IF EXISTS ...`
-    # was reported as non-repeatable on 2026-09-15. It is repeatable -
-    # verified by applying 016 twice to PostgreSQL 16 - and the IF EXISTS
-    # is required below, so a bare DROP CONSTRAINT is still caught.
-    r"|ALTER\s+TABLE\s+[\w.\"]+\s+DROP\s+\w+\s+IF\s+EXISTS"
     r"|COMMENT\s+ON|GRANT|REVOKE)", re.I | re.S)
 
 _DROP_POLICY = re.compile(r'DROP POLICY IF EXISTS "([^"]+)" ON (\w+)', re.I)
 _CREATE_POLICY = re.compile(r'CREATE POLICY "([^"]+)" ON (\w+)', re.I)
+
+# The same argument as the policy pair, for constraints.
+#
+# ALTER TABLE ... ADD CONSTRAINT has no IF NOT EXISTS, exactly like
+# CREATE POLICY, so the only way to make it repeatable is to drop it
+# first in the same file. 017 does; the checker did not know the pattern
+# and reported it on 2026-09-15. Recognising the PAIR is not a
+# loosening - an unpaired ADD CONSTRAINT is still caught, which is the
+# case that actually breaks a re-run.
+_DROP_CONSTRAINT = re.compile(
+    r'ALTER TABLE ([\w.]+) DROP CONSTRAINT IF EXISTS ([\w.]+)', re.I)
+_ADD_CONSTRAINT = re.compile(
+    r'ALTER TABLE ([\w.]+) ADD CONSTRAINT ([\w.]+)', re.I)
 
 
 def _split():
@@ -111,6 +117,17 @@ def _offenders(path, split) -> list:
             # CREATE POLICY has no IF NOT EXISTS. The only way to make it
             # repeatable is to drop it first, in the same file.
             if (m.group(1), m.group(2)) not in dropped:
+                bad.append(one[:120])
+            continue
+
+        m = _DROP_CONSTRAINT.match(one)
+        if m:
+            dropped.add((m.group(2).lower(), m.group(1).lower()))
+            continue
+
+        m = _ADD_CONSTRAINT.match(one)
+        if m:
+            if (m.group(2).lower(), m.group(1).lower()) not in dropped:
                 bad.append(one[:120])
             continue
 

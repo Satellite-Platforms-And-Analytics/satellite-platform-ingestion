@@ -220,3 +220,50 @@ def test_a_project_with_no_lead_organisation_still_parses() -> None:
 def test_a_detail_without_an_id_or_title_is_refused(broken) -> None:
     """Counted as unparseable and reported, not written as a blank row."""
     assert parse_project(broken) is None
+
+
+# ── Found by the first real import, 2026-09-15 ───────────────────────
+
+@pytest.mark.parametrize("raw,expected", [
+    # lastUpdated, US short form with a two-digit year. 500 of 500
+    # projects in the first import reported an unparseable date, and
+    # this was all of them.
+    ("01/27/25", date(2025, 1, 27)),
+    ("08/20/26", date(2026, 8, 20)),
+    ("12/31/99", date(1999, 12, 31)),
+])
+def test_the_us_short_date_techport_uses_for_lastupdated(raw, expected) -> None:
+    """
+    TechPort uses TWO date formats in one record: startDate and endDate
+    are ISO, lastUpdated is MM/DD/YY. The MM/DD order is established
+    rather than assumed - "01/27/25" has 27 in the second position, and
+    27 is not a month.
+    """
+    assert _date(raw) == expected
+
+
+@pytest.mark.parametrize("code", ["TX08.X", "TX11.X", "TX14.X", "TX08.1.X"])
+def test_natures_other_buckets_are_valid_taxonomy(code: str) -> None:
+    """
+    The first import refused five of these as malformed. They are NASA's
+    own "Other" buckets. Measured across 548 cached details: 518 strict,
+    5 with `.X`, nothing else - so 017 relaxes the constraint to exactly
+    what the source uses.
+    """
+    r = parse_project(_detail(primaryTaxonomyNodes=[
+        {"code": code, "title": "Other Something"}]))
+    assert [n["tx_code"] for n in r["nodes"]] == [code]
+    assert r["bad_nodes"] == []
+
+
+@pytest.mark.parametrize("bad", [
+    "Sensors and Instruments", "tx08", "TX8", "11.6.4", "TXAB", "",
+])
+def test_relaxing_for_X_did_not_let_a_title_through(bad: str) -> None:
+    """
+    The whole point of the pattern is refusing a title in the code
+    column (AD-086). Widening it for `X` must not widen it for prose.
+    """
+    r = parse_project(_detail(primaryTaxonomyNodes=[
+        {"code": bad, "title": "a title"}]))
+    assert r["nodes"] == []

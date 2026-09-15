@@ -301,7 +301,18 @@ def survey(c: "Client", ids: list, sample: int, use_cache: bool) -> int:
 #: rather than aborting a ten-hour import. The constraint is still the
 #: authority; this is what keeps one malformed node from costing the
 #: other 19,689 projects.
-TX_CODE = re.compile(r"^TX[0-9]{2}(\.[0-9]+)*$")
+#:
+#: `X` IS A REAL SEGMENT, NOT JUNK. The first 500-project import refused
+#: five nodes - TX08.X "Other Sensors and Instruments", TX11.X "Other
+#: Software...", TX14.X "Other Thermal Management Systems". Those are
+#: NASA's own "Other" buckets within a top-level area, and the original
+#: digits-only pattern was throwing away legitimate taxonomy.
+#:
+#: Measured across 548 cached details: 518 strict, 5 with `.X`, and
+#: nothing else at all. So the relaxation is to exactly what the source
+#: uses, not to whatever might turn up. `tx_top` is unaffected -
+#: split_part('TX14.X', '.', 1) is still TX14.
+TX_CODE = re.compile(r"^TX[0-9]{2}(\.([0-9]+|X))*$")
 
 
 def _date(v):
@@ -319,7 +330,21 @@ def _date(v):
     if not v:
         return None
     text_v = str(v).strip()[:10]
-    for fmt in ("%Y-%m-%d", "%Y-%m", "%Y"):
+    # TECHPORT USES TWO DIFFERENT DATE FORMATS IN ONE RECORD.
+    #
+    # startDate and endDate are ISO ("2018-04-23"). lastUpdated is US
+    # short form with a two-digit year ("01/27/25"). The first import of
+    # 500 projects reported 500 unparseable dates - exactly one per
+    # project - which is what sent anyone looking at the cache instead
+    # of guessing.
+    #
+    # The MM/DD order is established, not assumed: "01/27/25" has a 27
+    # in the second position, and 27 is not a month.
+    #
+    # %y maps 00-68 to 2000-2068. TechPort projects begin in the 2000s,
+    # so the window is not a problem today and is written down for the
+    # day it is.
+    for fmt in ("%Y-%m-%d", "%m/%d/%y", "%m/%d/%Y", "%Y-%m", "%Y"):
         try:
             return datetime.strptime(text_v, fmt).date()
         except ValueError:
@@ -384,18 +409,31 @@ def parse_project(detail: dict) -> "dict | None":
     }
 
 
-def apply(c: "Client", ids: list, limit: int, use_cache: bool) -> int:
+def apply(c: "Client", ids: list, limit: int, use_cache: bool,
+          refresh: bool = False) -> int:
     engine = get_engine()
     with engine.connect() as conn:
         done = set(conn.execute(text(
             "SELECT techport_id FROM research_projects")).scalars())
         strict_idx, relaxed_idx = load_org_index(conn)
 
-    todo = [i for i in ids if i not in done][:max(0, limit)]
+    if refresh:
+        # RE-PROCESS WHAT IS ALREADY THERE, FOR FREE.
+        #
+        # Every detail is kept in data/cache/techport, so a parser fix
+        # can be applied to rows already imported at a cost of zero
+        # requests. That is what made the MM/DD/YY discovery cheap to
+        # act on: 500 rows with a NULL last_updated became 500 rows with
+        # a date, without touching the API.
+        todo = [i for i in ids if i in done][:max(0, limit)]
+    else:
+        todo = [i for i in ids if i not in done][:max(0, limit)]
     print(f"  projects in listing          : {len(ids):,}")
     print(f"  already imported             : {len(done):,}")
     print(f"  this run                     : {len(todo):,} "
-          f"(--limit {limit})")
+          f"(--limit {limit}"
+          + (", --refresh: re-parsing rows already written" if refresh
+             else "") + ")")
     if not todo:
         print("\n  Nothing to do. Every project in the listing is "
               "already imported.")
@@ -611,6 +649,11 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int, default=500,
                     help="Projects per --apply run (default 500).")
     ap.add_argument("--since", default="2020-01-01")
+    ap.add_argument("--refresh", action="store_true",
+                    help="Re-parse projects ALREADY imported instead of "
+                         "fetching new ones. Free when the cache is "
+                         "warm; how a parser fix reaches rows already "
+                         "written.")
     ap.add_argument("--no-cache", action="store_true")
     args = ap.parse_args(argv)
 
@@ -620,7 +663,8 @@ def main(argv=None) -> int:
     print(f"  listing projects updated since {args.since} ...")
     ids = project_ids(c, args.since)
     if args.apply:
-        return apply(c, ids, args.limit, use_cache=not args.no_cache)
+        return apply(c, ids, args.limit, use_cache=not args.no_cache,
+                     refresh=args.refresh)
     return survey(c, ids, args.sample, use_cache=not args.no_cache)
 
 
