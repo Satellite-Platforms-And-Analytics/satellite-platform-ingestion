@@ -59,6 +59,13 @@ IDEMPOTENT = re.compile(
     r"|ALTER\s+VIEW\s+\w+\s+SET\s+\("
     r"|ALTER\s+DEFAULT\s+PRIVILEGES"
     r"|DROP\s+\w+(\s+\w+)?\s+IF\s+EXISTS"
+    # ALTER TABLE ... DROP <thing> IF EXISTS. The pattern above only
+    # matches a statement that BEGINS with DROP, so 016's
+    # `ALTER TABLE research_organizations DROP CONSTRAINT IF EXISTS ...`
+    # was reported as non-repeatable on 2026-09-15. It is repeatable -
+    # verified by applying 016 twice to PostgreSQL 16 - and the IF EXISTS
+    # is required below, so a bare DROP CONSTRAINT is still caught.
+    r"|ALTER\s+TABLE\s+[\w.\"]+\s+DROP\s+\w+\s+IF\s+EXISTS"
     r"|COMMENT\s+ON|GRANT|REVOKE)", re.I | re.S)
 
 _DROP_POLICY = re.compile(r'DROP POLICY IF EXISTS "([^"]+)" ON (\w+)', re.I)

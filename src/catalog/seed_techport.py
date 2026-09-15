@@ -20,12 +20,30 @@ THE QUESTION THIS SURVEY EXISTS TO ANSWER
   > `organizationName` from it and nothing else, so it is NOT KNOWN
   > whether it carries a stable organisation id.
 
-`research_organizations` therefore uses a surrogate key with a UNIQUE
-normalised name, and reserves `techport_org_id` for when this is
-answered. **Until it is answered, `--apply` refuses to run.** Keying an
-import on a field nobody has looked at is the mistake the 2026-09-11
-plan made and 09-12 corrected, and it is cheaper to refuse than to
-migrate out of.
+ANSWERED 2026-09-15: `organizationId` is present on 50 of 50 sampled
+projects, alongside organizationName, organizationType, city,
+stateTerritory, country and organizationRole. So the id exists and is
+the upsert key.
+
+`016_research_org_key.sql` is the consequence: `name_norm` was UNIQUE
+only because it was going to be the key, and leaving it so would reject
+two TechPort organisation records whose names normalise alike - not as a
+bad row, but as an IntegrityError partway through a ten-hour import, for
+a reason that reads like corruption and is not. It now carries a UNIQUE
+index only among rows that have no id, which is exactly where it is
+still the key.
+
+That swap cost nothing because the survey ran BEFORE the import and the
+table held zero rows. That is the whole argument for refusing to guess.
+
+DELIBERATELY NOT IMPORTED YET
+=============================
+leadOrganization also carries `city`, `stateTerritory`, `country` and
+`organizationRole`, and 015 has no columns for them. They are not added
+today, because backfilling them later is FREE: every detail is kept in
+data/cache/techport, so a column added in a month is filled by a re-run
+that makes no requests at all. A schema change that can be deferred at
+zero future cost should be.
 
 PREDICTIONS, WRITTEN 2026-09-15 BEFORE THE FIRST RUN
 ====================================================
@@ -64,7 +82,9 @@ import argparse
 import collections
 import json
 import os
+import re
 import sys
+from datetime import date, datetime
 
 from src.env import bootstrap
 
@@ -238,19 +258,343 @@ def survey(c: "Client", ids: list, sample: int, use_cache: bool) -> int:
         strict_idx, relaxed_idx = load_org_index(conn)
         already = conn.execute(text(
             "SELECT count(*) FROM research_projects")).scalar()
-    matched = sum(1 for nm in org_names
-                  if match_org(nm, strict_idx, relaxed_idx)[0])
+    # REPORT THE TWO RULES SEPARATELY. THIS WAS WRONG ON THE FIRST RUN.
+    #
+    # The first version took match_org(...)[0] and discarded `how`,
+    # printing one combined rate - and then compared it against the 3%
+    # that 09-14 measured for the STRICT rule alone. The comparison read
+    # as a fivefold improvement. It was the same data: 1 strict + 5
+    # agency-prefix, which 09-14 also reported as 17% combined.
+    #
+    # Merging them is precisely what AD-085 exists to prevent, and
+    # `match_org` returns `how` precisely so it cannot happen. It was
+    # thrown away one commit after a test was written asserting the label
+    # matters. The information that answers the question was present and
+    # discarded - the same shape as the response body, the taxonomy code
+    # and detail_shape before it.
+    by_how: collections.Counter = collections.Counter()
+    for nm in org_names:
+        _code, how = match_org(nm, strict_idx, relaxed_idx)
+        by_how[how] += 1
+    n_names = max(1, len(org_names))
+    strict_n = by_how.get("strict", 0)
+    loose_n = by_how.get("agency_prefix_stripped", 0)
     print(f"\n  AGAINST THE DATABASE")
     print(f"    research_projects present  : {already:,}")
-    print(f"    performers matching an org : {matched}/{len(org_names)} "
-          f"({100*matched/max(1,len(org_names)):.0f}%)")
-    print(f"    (predicted 2-6% of PROJECTS; measured 3% of distinct "
-          f"names on 09-14)")
+    print(f"    STRICT  distinct performers: {strict_n}/{len(org_names)} "
+          f"({100*strict_n/n_names:.0f}%)")
+    print(f"    +agency-prefix stripped    : +{loose_n} -> "
+          f"{strict_n+loose_n} ({100*(strict_n+loose_n)/n_names:.0f}%)")
+    print(f"    unmatched                  : {by_how.get(None, 0)}")
+    print(f"    (09-14 measured 3% strict, 17% combined, on a 50-project")
+    print(f"     sample. Compare like with like: the combined number is")
+    print(f"     mostly NASA field centres and buys almost no companies.)")
 
     print(f"\n  requests used: {c.n}   served from cache: {from_cache}")
     print(f"  quota remaining: {c.remaining}"
           + (f" of {c.limit}" if c.limit else ""))
     print("\n  Nothing was written.")
+    return 0
+
+
+#: 015's CHECK, restated here so a bad node is REPORTED and skipped
+#: rather than aborting a ten-hour import. The constraint is still the
+#: authority; this is what keeps one malformed node from costing the
+#: other 19,689 projects.
+TX_CODE = re.compile(r"^TX[0-9]{2}(\.[0-9]+)*$")
+
+
+def _date(v):
+    """
+    A date, or None - and the caller counts the Nones.
+
+    TechPort's date formats are not documented anywhere this project has
+    read, and the listing returns things like "2026-9-10" (no zero
+    padding), which `date.fromisoformat` rejects on Python < 3.11. So
+    parsing is tolerant and FAILURES ARE COUNTED, because a silent NULL
+    is how a column quietly becomes empty while the import reports
+    success - the failure mode this project has now catalogued five
+    times under "an error path that destroys the error".
+    """
+    if not v:
+        return None
+    text_v = str(v).strip()[:10]
+    for fmt in ("%Y-%m-%d", "%Y-%m", "%Y"):
+        try:
+            return datetime.strptime(text_v, fmt).date()
+        except ValueError:
+            continue
+    parts = text_v.split("-")
+    if len(parts) == 3 and all(x.isdigit() for x in parts):
+        try:
+            return date(int(parts[0]), int(parts[1]), int(parts[2]))
+        except ValueError:
+            return None
+    return None
+
+
+def parse_project(detail: dict) -> "dict | None":
+    """One TechPort detail -> the rows 015 wants. Pure: no IO."""
+    p = detail.get("project", detail) if isinstance(detail, dict) else {}
+    pid = p.get("projectId")
+    if pid is None or not p.get("title"):
+        return None
+
+    name, id_key, id_value, shape = read_lead(p)
+
+    trl = p.get("trlCurrent")
+    trl = int(trl) if isinstance(trl, (int, float)) and 1 <= trl <= 9 else None
+
+    nodes, bad_nodes = [], []
+    tx = p.get("primaryTaxonomyNodes") or p.get("primaryTx")
+    for node in (tx if isinstance(tx, list) else ([tx] if tx else [])):
+        if isinstance(node, dict):
+            code = (node.get("code") or node.get("taxonomyNumber")
+                    or node.get("number") or "")
+            title = node.get("title") or ""
+        else:
+            code, title = "", str(node)
+        code = str(code).strip()
+        title = str(title).strip()
+        if code and title and TX_CODE.match(code):
+            nodes.append({"tx_code": code, "tx_title": title})
+        elif code or title:
+            bad_nodes.append({"code": code, "title": title})
+
+    return {
+        "techport_id": int(pid),
+        "title": str(p.get("title")).strip(),
+        "status": (p.get("status") or None),
+        "start_date": _date(p.get("startDate")),
+        "end_date": _date(p.get("endDate")),
+        "trl_current": trl,
+        "last_updated": _date(p.get("lastUpdated")),
+        "org": ({"techport_org_id": int(id_value) if id_value is not None
+                 else None,
+                 "name": str(name).strip(),
+                 "name_norm": norm(name),
+                 "org_type": (p.get("leadOrganization") or {}).get(
+                     "organizationType") if shape == "dict" else None}
+                if name else None),
+        "nodes": nodes,
+        "bad_nodes": bad_nodes,
+        "date_misses": sum(
+            1 for k in ("startDate", "endDate", "lastUpdated")
+            if p.get(k) and _date(p.get(k)) is None),
+    }
+
+
+def apply(c: "Client", ids: list, limit: int, use_cache: bool) -> int:
+    engine = get_engine()
+    with engine.connect() as conn:
+        done = set(conn.execute(text(
+            "SELECT techport_id FROM research_projects")).scalars())
+        strict_idx, relaxed_idx = load_org_index(conn)
+
+    todo = [i for i in ids if i not in done][:max(0, limit)]
+    print(f"  projects in listing          : {len(ids):,}")
+    print(f"  already imported             : {len(done):,}")
+    print(f"  this run                     : {len(todo):,} "
+          f"(--limit {limit})")
+    if not todo:
+        print("\n  Nothing to do. Every project in the listing is "
+              "already imported.")
+        return 0
+
+    rows, orgs, from_cache = [], {}, 0
+    bad_nodes, date_misses, unparseable = [], 0, 0
+    for n, pid in enumerate(todo, 1):
+        d, hit = cached_detail(c, pid, use_cache=use_cache)
+        from_cache += hit
+        r = parse_project(d)
+        if r is None:
+            unparseable += 1
+            continue
+        date_misses += r["date_misses"]
+        for b in r["bad_nodes"]:
+            bad_nodes.append((r["techport_id"], b))
+        if r["org"]:
+            o = r["org"]
+            key = o["techport_org_id"] or ("name:" + o["name_norm"])
+            if key not in orgs:
+                code, how = match_org(o["name"], strict_idx, relaxed_idx)
+                o["organization_code"] = code
+                o["match_method"] = how
+                o["source_confidence"] = (
+                    1.0 if how == "strict"
+                    else 0.85 if how else None)
+                orgs[key] = o
+            r["org_key"] = key
+        rows.append(r)
+        if n % 50 == 0:
+            print(f"    fetched {n}/{len(todo)}   quota {c.remaining}   "
+                  f"cached {from_cache}")
+
+    print(f"\n  parsed {len(rows):,} projects, {len(orgs):,} distinct "
+          f"performers")
+
+    # AN EMPTY BATCH IS NOT AN ERROR, AND SQLALCHEMY DISAGREES.
+    #
+    # executemany with an empty parameter list raises "A value is
+    # required for bind parameter 'techport_id'" rather than doing
+    # nothing. That turns a batch in which every project failed to parse
+    # into a crash - and because an unparseable project is never written,
+    # it is selected again on the next run, and crashes again. A single
+    # malformed project at the end of the listing would make the import
+    # unable to finish, permanently, at 99%.
+    #
+    # Found by a smoke test whose third run had exactly one project left
+    # and that project unparseable. It is not a hypothetical shape: the
+    # last batch of a 19,690-project import is precisely where the
+    # leftovers collect.
+    if not rows:
+        print(f"\n  Nothing to write: all {len(todo)} projects in this "
+              f"batch failed to parse.")
+        print(f"  They are NOT marked done, so they will be retried - "
+              f"which is correct for a")
+        print(f"  transient fault and a loop for a permanent one. If this "
+              f"repeats with the same")
+        print(f"  count, the projects are malformed at the source and "
+              f"need excluding by id.")
+        return 1
+
+    with engine.begin() as conn:
+        # Performers with an id: upsert on it. Without: on name_norm,
+        # against 016's partial unique index.
+        with_id = [o for o in orgs.values() if o["techport_org_id"]]
+        no_id = [o for o in orgs.values() if not o["techport_org_id"]]
+        if with_id:
+            conn.execute(text("""
+                INSERT INTO research_organizations
+                    (name, name_norm, org_type, techport_org_id,
+                     organization_code, match_method, source_confidence,
+                     matched_at)
+                VALUES (:name, :name_norm, :org_type, :techport_org_id,
+                        :organization_code, :match_method,
+                        :source_confidence,
+                        CASE WHEN :organization_code IS NULL
+                             THEN NULL ELSE NOW() END)
+                ON CONFLICT (techport_org_id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    name_norm = EXCLUDED.name_norm,
+                    org_type = COALESCE(EXCLUDED.org_type,
+                                        research_organizations.org_type),
+                    organization_code = EXCLUDED.organization_code,
+                    match_method = EXCLUDED.match_method,
+                    source_confidence = EXCLUDED.source_confidence,
+                    matched_at = EXCLUDED.matched_at,
+                    updated_at = NOW()
+            """), with_id)
+        if no_id:
+            conn.execute(text("""
+                INSERT INTO research_organizations
+                    (name, name_norm, org_type, organization_code,
+                     match_method, source_confidence, matched_at)
+                VALUES (:name, :name_norm, :org_type, :organization_code,
+                        :match_method, :source_confidence,
+                        CASE WHEN :organization_code IS NULL
+                             THEN NULL ELSE NOW() END)
+                ON CONFLICT (name_norm) WHERE techport_org_id IS NULL
+                DO UPDATE SET
+                    name = EXCLUDED.name,
+                    organization_code = EXCLUDED.organization_code,
+                    match_method = EXCLUDED.match_method,
+                    updated_at = NOW()
+            """), no_id)
+
+        # .all() before dict(). A CursorResult is an iterator, not a
+        # mapping, and dict() of one raises rather than returning an
+        # empty dict - so this fails loudly, which is the only reason it
+        # was caught before an import rather than during one.
+        by_id = dict(conn.execute(text(
+            "SELECT techport_org_id, id FROM research_organizations "
+            "WHERE techport_org_id = ANY(:v)"),
+            {"v": [o["techport_org_id"] for o in with_id] or [0]}).all())
+        by_norm = dict(conn.execute(text(
+            "SELECT name_norm, id FROM research_organizations "
+            "WHERE techport_org_id IS NULL AND name_norm = ANY(:v)"),
+            {"v": [o["name_norm"] for o in no_id] or [""]}).all())
+
+        for r in rows:
+            key = r.get("org_key")
+            if key is None:
+                r["lead_org_id"] = None
+            elif isinstance(key, int):
+                r["lead_org_id"] = by_id.get(key)
+            else:
+                r["lead_org_id"] = by_norm.get(key[5:])
+
+        conn.execute(text("""
+            INSERT INTO research_projects
+                (techport_id, title, status, start_date, end_date,
+                 trl_current, lead_org_id, last_updated, fetched_at)
+            VALUES (:techport_id, :title, :status, :start_date, :end_date,
+                    :trl_current, :lead_org_id, :last_updated, NOW())
+            ON CONFLICT (techport_id) DO UPDATE SET
+                title = EXCLUDED.title,
+                status = EXCLUDED.status,
+                start_date = EXCLUDED.start_date,
+                end_date = EXCLUDED.end_date,
+                trl_current = EXCLUDED.trl_current,
+                lead_org_id = EXCLUDED.lead_org_id,
+                last_updated = EXCLUDED.last_updated,
+                fetched_at = EXCLUDED.fetched_at,
+                updated_at = NOW()
+        """), [{k: r[k] for k in (
+            "techport_id", "title", "status", "start_date", "end_date",
+            "trl_current", "lead_org_id", "last_updated")} for r in rows])
+
+        tax = [{"techport_id": r["techport_id"], **nd}
+               for r in rows for nd in r["nodes"]]
+        if tax:
+            conn.execute(text("""
+                INSERT INTO research_project_taxonomy
+                    (techport_id, tx_code, tx_title)
+                VALUES (:techport_id, :tx_code, :tx_title)
+                ON CONFLICT (techport_id, tx_code) DO UPDATE SET
+                    tx_title = EXCLUDED.tx_title
+            """), tax)
+
+    with engine.connect() as conn:
+        totals = conn.execute(text("""
+            SELECT (SELECT count(*) FROM research_projects),
+                   (SELECT count(*) FROM research_organizations),
+                   (SELECT count(*) FROM research_project_taxonomy),
+                   (SELECT count(*) FROM research_organizations
+                     WHERE organization_code IS NOT NULL)
+        """)).one()
+
+    print(f"\n  WRITTEN")
+    print(f"    research_projects          : {totals[0]:,} total")
+    print(f"    research_organizations     : {totals[1]:,} total "
+          f"({totals[3]:,} linked to an operator)")
+    print(f"    research_project_taxonomy  : {totals[2]:,} total")
+
+    # ── WHAT WAS NOT WRITTEN, NAMED ──────────────────────────────────
+    #
+    # An import that reports only what it wrote is an import that hides
+    # what it dropped.
+    print(f"\n  SKIPPED OR MISSING")
+    print(f"    details that would not parse : {unparseable}")
+    print(f"    dates that would not parse   : {date_misses}")
+    print(f"    taxonomy nodes refused       : {len(bad_nodes)}")
+    for pid, b in bad_nodes[:5]:
+        print(f"      {pid}  code={b['code'][:24]!r} "
+              f"title={b['title'][:34]!r}")
+    if bad_nodes:
+        print(f"      (a node whose code fails 015's CHECK is skipped and "
+              f"listed, not written\n"
+              f"       as NULL and not allowed to abort the run)")
+
+    remaining = len(ids) - totals[0]
+    print(f"\n  requests used: {c.n}   served from cache: {from_cache}")
+    print(f"  quota remaining: {c.remaining}"
+          + (f" of {c.limit}" if c.limit else ""))
+    if remaining > 0:
+        print(f"\n  {remaining:,} projects still to import. Re-run; the "
+              f"rows already written are the watermark.")
+    else:
+        print(f"\n  Every project in the listing is imported.")
     return 0
 
 
@@ -261,8 +605,7 @@ def main(argv=None) -> int:
     ap.add_argument("--survey", action="store_true",
                     help="Measure, write nothing. The default.")
     ap.add_argument("--apply", action="store_true",
-                    help="Import. Refuses until the survey has answered "
-                         "the leadOrganization question.")
+                    help="Import. Writes at most --limit projects.")
     ap.add_argument("--sample", type=int, default=50,
                     help="Projects to inspect in a survey (default 50).")
     ap.add_argument("--limit", type=int, default=500,
@@ -271,33 +614,16 @@ def main(argv=None) -> int:
     ap.add_argument("--no-cache", action="store_true")
     args = ap.parse_args(argv)
 
-    if args.apply:
-        # REFUSING IS THE FEATURE.
-        #
-        # The apply path has to decide what research_organizations is
-        # keyed on, and 015 records that as unanswered. Writing it now
-        # means guessing, and a guess about a primary key is the
-        # expensive kind: it is not wrong until there are rows, and by
-        # then it is a migration.
-        print("--apply is not implemented yet, on purpose.\n")
-        print("It cannot be written correctly until the survey answers "
-              "whether TechPort's")
-        print("leadOrganization carries a stable id - that decides "
-              "whether performers are")
-        print("upserted on techport_org_id or on name_norm, and 015 "
-              "records it as an open")
-        print("question rather than a guess.\n")
-        print("Run the survey and read THE QUESTION 015 LEFT OPEN:\n")
-        print("    python -m src.catalog.seed_techport --survey\n")
-        print("It costs ~51 requests, and nothing after the first run "
-              "if the cache is warm.")
-        return 2
-
     c = Client(_key())
-    print("TechPort R&D import - SURVEY, read-only\n")
+    print(f"TechPort R&D import - "
+          f"{'APPLY' if args.apply else 'SURVEY, read-only'}\n")
     print(f"  listing projects updated since {args.since} ...")
     ids = project_ids(c, args.since)
+    if args.apply:
+        return apply(c, ids, args.limit, use_cache=not args.no_cache)
     return survey(c, ids, args.sample, use_cache=not args.no_cache)
+
+
 
 
 if __name__ == "__main__":
