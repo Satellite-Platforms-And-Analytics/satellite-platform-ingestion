@@ -59,6 +59,12 @@ But a guard that skips by design must fail somewhere by default, or
 the four WIT tests that had skipped in CI since they were written). Set
 **REQUIRE_DB=1** and a missing DATABASE_URL is a failure. That is what the
 workstation and any future scheduled security check should set.
+
+    PowerShell:   $env:REQUIRE_DB=1; pytest tests/test_db_privileges.py
+    bash:         REQUIRE_DB=1 pytest tests/test_db_privileges.py
+
+The PowerShell form is spelled out because this workstation is
+PowerShell, where `VAR=1 cmd` is read as a command named `VAR=1`.
 """
 from __future__ import annotations
 

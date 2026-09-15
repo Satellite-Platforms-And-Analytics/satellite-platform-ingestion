@@ -31,6 +31,20 @@ Skips when DATABASE_URL is absent or unreachable, fails under REQUIRE_DB,
 and skips (rather than failing) when 015 has simply not been applied yet
 - so it does not go red on every workstation between writing a migration
 and running it.
+
+TO RUN IT AGAINST THE LIVE DATABASE
+===================================
+This workstation is PowerShell, where `VAR=1 cmd` is not a thing - it is
+read as a command named `VAR=1`, which is the error it gives. Both forms,
+because the bash one keeps getting written from habit:
+
+    PowerShell:   $env:REQUIRE_DB=1; pytest tests/test_research_schema.py
+    bash:         REQUIRE_DB=1 pytest tests/test_research_schema.py
+
+`$env:` persists for the rest of that PowerShell window. On the
+workstation that is what you want. Clear it with
+`Remove-Item Env:REQUIRE_DB` before working offline, or these turn from
+skips into failures.
 """
 from __future__ import annotations
 

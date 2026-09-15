@@ -123,6 +123,9 @@ import requests                                              # noqa: E402
 from sqlalchemy import text                                  # noqa: E402
 
 from src.db.writer import get_engine                         # noqa: E402
+from src.catalog.org_match import (                         # noqa: E402
+    load_org_index, match_org, norm, norm_relaxed,
+)
 from src.useragent import user_agent                         # noqa: E402
 
 BASE = "https://api.nasa.gov/techport/api"
@@ -384,60 +387,13 @@ def cached_detail(c: "Client", pid, use_cache: bool = True):
     return d, False
 
 
-#: Tokens that differ between catalogues without changing the organisation.
-_NOISE = re.compile(
-    r"\b(inc|incorporated|llc|ltd|limited|corp|corporation|co|company|"
-    r"gmbh|plc|sa|ab|bv|the|of|and)\b\.?", re.I)
-
-
-#: Agency prefixes that one catalogue carries and the other does not.
-#: GCAT stores "NASA Goddard Space Flight Center"; TechPort says "Goddard
-#: Space Flight Center". Stripping this is a real loosening of the match,
-#: so it is reported as its OWN rate rather than folded into the strict
-#: one - the survey's job is to say how much the prefix costs, not to
-#: quietly buy it.
-_AGENCY_PREFIX = re.compile(
-    r"^(nasa|esa|jaxa|isro|usaf|us air force|us space force|dod|noaa)\s+")
-
-
-def norm(s: "str | None") -> str:
-    """Lowercase, strip punctuation and corporate noise, collapse spaces."""
-    if not s:
-        return ""
-    s = s.lower().replace("&", " and ")
-    s = _NOISE.sub(" ", s)
-    s = re.sub(r"[^a-z0-9 ]+", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def norm_relaxed(s: "str | None") -> str:
-    """`norm`, and also without a leading agency name."""
-    return _AGENCY_PREFIX.sub("", norm(s)).strip()
-
-
-def load_org_index(conn) -> tuple:
-    """
-    Two indexes: strict, and with a leading agency name stripped.
-
-    Kept apart so the survey can report what the looser rule buys. A
-    single merged index would report one rate and hide the fact that most
-    of it came from a rule nobody has agreed to yet.
-    """
-    strict: dict = {}
-    relaxed: dict = {}
-    rows = conn.execute(text("""
-        SELECT code, name_english, name_native, name_short
-          FROM organizations
-    """))
-    for code, eng, nat, short in rows:
-        for candidate in (eng, nat, short):
-            k = norm(candidate)
-            if k:
-                strict.setdefault(k, code)
-            r = norm_relaxed(candidate)
-            if r:
-                relaxed.setdefault(r, code)
-    return strict, relaxed
+# The matcher moved to src/catalog/org_match.py on 2026-09-15, before its
+# second caller existed rather than after. 015 makes
+# research_organizations.name_norm a UNIQUE key computed with these exact
+# rules, so the importer and this survey must agree on them forever - and
+# two implementations of one rule is how they stop agreeing. The same
+# lesson the User-Agent produced yesterday, applied one day earlier in
+# its life cycle.
 
 
 def main(argv=None) -> int:
@@ -587,17 +543,14 @@ def main(argv=None) -> int:
     with engine.connect() as conn:
         strict_idx, relaxed_idx = load_org_index(conn)
 
+    # One matcher, shared with the importer. The local copy this replaces
+    # labelled the loose match "relaxed" while 015 and the importer call
+    # it "agency_prefix_stripped" - a disagreement that would have
+    # reached the database as two different values of match_method for
+    # one rule, which is precisely the drift the shared module exists to
+    # prevent, already happening inside a single file.
     def match(name):
-        """-> (code, how) where how is 'strict' | 'relaxed' | None."""
-        if not name:
-            return None, None
-        code = strict_idx.get(norm(name))
-        if code:
-            return code, "strict"
-        code = relaxed_idx.get(norm_relaxed(name))
-        if code:
-            return code, "relaxed"
-        return None, None
+        return match_org(name, strict_idx, relaxed_idx)
 
     for r in records:
         r["code"], r["how"] = match(r["org"])
@@ -611,7 +564,7 @@ def main(argv=None) -> int:
         code, how = match(name)
         if how == "strict":
             matched[name] = (code, count)
-        elif how == "relaxed":
+        elif how == "agency_prefix_stripped":
             by_relaxed[name] = (code, count)
         else:
             unmatched.append((name, count))
@@ -659,10 +612,10 @@ def main(argv=None) -> int:
         return sum(1 for r in records if pred(r))
 
     strict_ok = n_with(lambda r: r["how"] == "strict")
-    any_ok = n_with(lambda r: r["how"] in ("strict", "relaxed"))
+    any_ok = n_with(lambda r: r["how"] in ("strict", "agency_prefix_stripped"))
     usable_strict = n_with(lambda r: r["how"] == "strict" and r["trl"]
                            and r["tx"])
-    usable_any = n_with(lambda r: r["how"] in ("strict", "relaxed")
+    usable_any = n_with(lambda r: r["how"] in ("strict", "agency_prefix_stripped")
                         and r["trl"] and r["tx"])
     all_three_any_org = n_with(lambda r: r["org"] and r["trl"] and r["tx"])
 
