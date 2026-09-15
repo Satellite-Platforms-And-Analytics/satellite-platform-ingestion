@@ -77,6 +77,29 @@ _DROP_CONSTRAINT = re.compile(
 _ADD_CONSTRAINT = re.compile(
     r'ALTER TABLE ([\w.]+) ADD CONSTRAINT ([\w.]+)', re.I)
 
+# THE GENERAL FORM OF THE RULE ABOVE.
+#
+# Three times in one day - CREATE POLICY, ADD CONSTRAINT, CREATE VIEW -
+# this file met a `DROP ... IF EXISTS x` / `CREATE ... x` pair it did not
+# recognise and reported a repeatable migration as broken. The pairing
+# argument was never specific to policies; it is simply the only way to
+# make any CREATE that lacks an IF NOT EXISTS form repeatable.
+#
+# So it is written once, for every object kind that has the same
+# problem, instead of a fourth special case next week. An UNPAIRED
+# CREATE is still flagged, which is the case that actually breaks a
+# re-run, and `CREATE OR REPLACE` continues to pass on its own.
+_KINDS = (r"MATERIALIZED\s+VIEW|VIEW|INDEX|TABLE|FUNCTION|TRIGGER|TYPE"
+          r"|SEQUENCE")
+_DROP_OBJECT = re.compile(
+    rf'DROP\s+({_KINDS})\s+IF\s+EXISTS\s+([\w."]+)', re.I)
+_CREATE_OBJECT = re.compile(
+    rf'CREATE\s+(?:UNIQUE\s+)?({_KINDS})\s+([\w."]+)', re.I)
+
+
+def _obj_key(m) -> tuple:
+    return (" ".join(m.group(1).split()).upper(), m.group(2).strip('"').lower())
+
 
 def _split():
     if not RUNNER.exists():
@@ -128,6 +151,21 @@ def _offenders(path, split) -> list:
         m = _ADD_CONSTRAINT.match(one)
         if m:
             if (m.group(2).lower(), m.group(1).lower()) not in dropped:
+                bad.append(one[:120])
+            continue
+
+        m = _DROP_OBJECT.match(one)
+        if m:
+            dropped.add(_obj_key(m))
+            continue
+
+        # Checked BEFORE the blanket IDEMPOTENT match so that a plain
+        # CREATE VIEW is judged on whether its drop exists, rather than
+        # falling through to a pattern that never covered it.
+        m = _CREATE_OBJECT.match(one)
+        if m and "IF NOT EXISTS" not in one.upper() \
+                and "OR REPLACE" not in one.upper():
+            if _obj_key(m) not in dropped:
                 bad.append(one[:120])
             continue
 

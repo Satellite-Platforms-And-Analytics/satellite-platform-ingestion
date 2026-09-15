@@ -314,6 +314,10 @@ def survey(c: "Client", ids: list, sample: int, use_cache: bool) -> int:
 #: split_part('TX14.X', '.', 1) is still TX14.
 TX_CODE = re.compile(r"^TX[0-9]{2}(\.([0-9]+|X))*$")
 
+#: A TX top-level area, and only a top level one. 018's CHECK agrees:
+#: a deeper code in the areas table would be a label nothing joins to.
+TX_AREA = re.compile(r"^TX[0-9]{2}$")
+
 
 def _date(v):
     """
@@ -386,7 +390,30 @@ def parse_project(detail: dict) -> "dict | None":
         elif code or title:
             bad_nodes.append({"code": code, "title": title})
 
+    # THE AREA TITLES COME FROM THE SOURCE.
+    #
+    # `primaryTxTree` is each node's full ancestry, as a list of chains,
+    # and its level-1 entry names the TX area: {"code": "TX03", "title":
+    # "Aerospace Power and Energy Storage", "level": 1}. 015 knows a
+    # project sits under TX03 and has no idea what TX03 is called.
+    #
+    # Hardcoding seventeen names is the mistake this project has already
+    # made twice - the plan written from memory instead of from the
+    # README, and the rate limit asserted while the server printed the
+    # real one on every response. Read it from the record.
+    areas = {}
+    tree = p.get("primaryTxTree")
+    for chain in (tree if isinstance(tree, list) else []):
+        for node in (chain if isinstance(chain, list) else [chain]):
+            if not isinstance(node, dict):
+                continue
+            code = str(node.get("code") or "").strip()
+            title = str(node.get("title") or "").strip()
+            if title and TX_AREA.match(code):
+                areas[code] = title
+
     return {
+        "areas": areas,
         "techport_id": int(pid),
         "title": str(p.get("title")).strip(),
         "status": (p.get("status") or None),
@@ -439,7 +466,7 @@ def apply(c: "Client", ids: list, limit: int, use_cache: bool,
               "already imported.")
         return 0
 
-    rows, orgs, from_cache = [], {}, 0
+    rows, orgs, areas, from_cache = [], {}, {}, 0
     bad_nodes, date_misses, unparseable = [], 0, 0
     for n, pid in enumerate(todo, 1):
         d, hit = cached_detail(c, pid, use_cache=use_cache)
@@ -449,6 +476,7 @@ def apply(c: "Client", ids: list, limit: int, use_cache: bool,
             unparseable += 1
             continue
         date_misses += r["date_misses"]
+        areas.update(r["areas"])
         for b in r["bad_nodes"]:
             bad_nodes.append((r["techport_id"], b))
         if r["org"]:
@@ -497,6 +525,14 @@ def apply(c: "Client", ids: list, limit: int, use_cache: bool,
         return 1
 
     with engine.begin() as conn:
+        if areas:
+            conn.execute(text("""
+                INSERT INTO research_taxonomy_areas (code, title)
+                VALUES (:code, :title)
+                ON CONFLICT (code) DO UPDATE SET
+                    title = EXCLUDED.title, updated_at = NOW()
+            """), [{"code": c, "title": t} for c, t in sorted(areas.items())])
+
         # Performers with an id: upsert on it. Without: on name_norm,
         # against 016's partial unique index.
         with_id = [o for o in orgs.values() if o["techport_org_id"]]
@@ -599,11 +635,13 @@ def apply(c: "Client", ids: list, limit: int, use_cache: bool,
                    (SELECT count(*) FROM research_organizations),
                    (SELECT count(*) FROM research_project_taxonomy),
                    (SELECT count(*) FROM research_organizations
-                     WHERE organization_code IS NOT NULL)
+                     WHERE organization_code IS NOT NULL),
+                   (SELECT count(*) FROM research_taxonomy_areas)
         """)).one()
 
     print(f"\n  WRITTEN")
     print(f"    research_projects          : {totals[0]:,} total")
+    print(f"    research_taxonomy_areas    : {totals[4]:,} of 17 named")
     print(f"    research_organizations     : {totals[1]:,} total "
           f"({totals[3]:,} linked to an operator)")
     print(f"    research_project_taxonomy  : {totals[2]:,} total")

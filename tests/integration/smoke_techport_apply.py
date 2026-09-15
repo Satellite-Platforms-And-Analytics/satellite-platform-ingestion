@@ -72,7 +72,14 @@ DETAILS = {
             "organizationName": "NASA Goddard Space Flight Center",
             "organizationId": 42, "organizationType": "NASA_CENTER"},
         "primaryTaxonomyNodes": [
-            {"code": "TX11.6.4", "title": "Quantum Computer"}]}},
+            {"code": "TX11.6.4", "title": "Quantum Computer"}],
+        # 018: the area title comes from the ancestry chain, level 1.
+        "primaryTxTree": [[
+            {"code": "TX11", "level": 1,
+             "title": "Software, Modeling, Simulation, and Information "
+                      "Processing"},
+            {"code": "TX11.6", "level": 2, "title": "Ground Computing"},
+            {"code": "TX11.6.4", "level": 3, "title": "Quantum Computer"}]]}},
     2: {"project": {
         "projectId": 2, "title": "No TRL, no taxonomy",
         "lastUpdated": "2026-08-01",
