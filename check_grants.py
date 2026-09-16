@@ -157,6 +157,10 @@ PIPELINE_WRITE = (
     "ingestion_log", "archive_watermark", "imagery_scenes", "sensors",
     "organizations", "research_organizations", "research_projects",
     "research_project_taxonomy", "research_taxonomy_areas",
+    # 020. A table added after 019 needs adding HERE too, or the control
+    # simply does not look at it - the quiet way a check stops covering
+    # what it claims to.
+    "upcoming_launches",
 )
 
 #: SELECT only. Their source of truth is a seed file in the repository,
@@ -295,8 +299,27 @@ def probe_role(conn, role: str) -> int:
             pass
         except Exception as exc:                             # noqa: BLE001
             bad += 1
-            print(f"  {probe}: refused — "
-                  f"{str(exc).splitlines()[0][:60]}")
+            msg = str(exc).splitlines()[0]
+            # "COULD NOT CHECK" AND "IS WRONG" ARE DIFFERENT ANSWERS.
+            #
+            # Being unable to SET ROLE is not the role holding too much;
+            # it is this control unable to run its own third layer. Both
+            # count as violations - a check that silently skips a layer
+            # while reporting green is the failure this project keeps
+            # cataloguing - but reporting them identically sends the
+            # reader to audit privileges that are fine.
+            if "set role" in msg.lower() or "InsufficientPrivilege" in msg:
+                print(f"  {probe}: COULD NOT BECOME THE ROLE, so the "
+                      f"write was not tested.")
+                print(f"    {msg[:110]}")
+                print(f"    This connection is not a member of "
+                      f"`{role}` and is not a superuser.")
+                print(f"    019 now does `GRANT {role} TO CURRENT_USER` "
+                      f"for exactly this; re-apply it.")
+                print(f"    Layers 1 and 2 above still hold - this is an "
+                      f"unverified layer, not a bad grant.")
+            else:
+                print(f"  {probe}: refused — {msg[:110]}")
         finally:
             conn.rollback()
 
