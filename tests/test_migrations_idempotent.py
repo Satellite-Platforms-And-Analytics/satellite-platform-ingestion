@@ -154,6 +154,36 @@ def _offenders(path, split) -> list:
                 bad.append(one[:120])
             continue
 
+        # A DO $$ ... $$ block, judged by its BODY.
+        #
+        # The checker cannot follow PL/pgSQL, and treating every DO block
+        # as safe would be a real hole - a block can contain anything.
+        # So the same pairing rule is applied to the body text: for every
+        # kind of object the block CREATEs, the body must also DROP that
+        # kind IF EXISTS, or guard it with IF NOT EXISTS.
+        #
+        # KIND-LEVEL, NOT NAME-LEVEL, and deliberately so. A DO block
+        # exists precisely to loop over names that are not literals -
+        # 019 builds its policy names with format() - so matching names
+        # here is not possible and pretending otherwise would be worse
+        # than saying which granularity is checked.
+        if one.upper().startswith("DO "):
+            body = one
+            kinds = {k.upper() for k in re.findall(
+                r"CREATE\s+(?:UNIQUE\s+)?(POLICY|VIEW|INDEX|TABLE|ROLE"
+                r"|FUNCTION|TRIGGER|TYPE|SEQUENCE)", body, re.I)}
+            for kind in sorted(kinds):
+                guarded = (
+                    re.search(rf"DROP\s+{kind}\s+IF\s+EXISTS", body, re.I)
+                    or re.search(rf"CREATE\s+{kind}\s+IF\s+NOT\s+EXISTS",
+                                 body, re.I)
+                    or re.search(r"IF\s+NOT\s+EXISTS\s*\(\s*SELECT", body, re.I)
+                )
+                if not guarded:
+                    bad.append(f"DO block CREATEs {kind} unguarded: "
+                               + one[:90])
+            continue
+
         m = _DROP_OBJECT.match(one)
         if m:
             dropped.add(_obj_key(m))

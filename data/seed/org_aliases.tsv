@@ -1,0 +1,27 @@
+# Curated provider-name decisions, and the deliberate refusals.
+#
+# WHY A FILE AND NOT A TABLE
+# A curated judgement belongs where it shows up in a diff, not where it
+# can be UPDATEd at 2am - AD-052's reasoning, applied to matching.
+#
+# WHY REFUSALS ARE STORED AT ALL
+# Because otherwise someone helpfully "fixes" them. Every `refuse` row
+# below is a case where a plausible match exists and is WRONG, or where
+# the organisation genuinely is not in GCAT. Both look like a gap to the
+# next person to read the unmatched list.
+#
+# decision: match  -> use org_code, recorded as match_method='alias'
+#           refuse -> leave NULL, and do not re-litigate without evidence
+#
+# Added 2026-09-15 from the Launch Library 2 survey (363 upcoming
+# launches, 40 distinct providers, 22 matched strictly).
+#
+alias	org_code	decision	basis
+Mitsubishi Heavy Industries	MHI	match	GCAT MHI, EName "Mitsubishi Heavy Industries (Launch Services)", type LA/LV/PL/E. The same organisation; strict matching missed it on the parenthetical suffix. 8 launches.
+Payload Aerospace S.L.	PLDS	match	GCAT PLDS, Name "Payload Aerospace S.L. (PLD Space)", type O/LV. Same organisation, missed on the parenthetical. 2 launches.
+China Aerospace Science and Technology Corporation	-	refuse	The nearest GCAT row is CASIC = China Aerospace Science and INDUSTRY Corporation. A DIFFERENT COMPANY. Aliasing this would attribute 10 launches to the wrong organisation, silently. If a CASC row appears in GCAT, revisit with the code in hand.
+United Launch Alliance	-	refuse	GCAT has no row meaning "ULA the launch provider". It models the joint venture as its parents plus a factory: ULAB (United Launch Alliance/Boeing, O/LA), ULAL (United Launch Alliance/Lockheed Martin, O/LA), ULAD (Decatur, LV/PL). Picking one JV half would attribute 36 launches - 10% of the manifest - to Boeing's or Lockheed's side arbitrarily. NULL is the honest answer, and AD-085 already says the link is an attribute rather than a requirement.
+Russian Federal Space Agency (ROSCOSMOS)	-	refuse	Not present in GCAT under Name, EName or ShortName. Genuinely absent, not mis-spelled. 6 launches.
+MaiaSpace	-	refuse	Not present in GCAT. A 2022 ArianeGroup subsidiary; the catalogue has not caught up. 2 launches.
+Deep Blue Aerospace	-	refuse	Not present in GCAT under any of its three name fields. 1 launch.
+Unknown	-	refuse	Launch Library 2 writes "Unknown" when the provider is not known. GCAT's X is Type CY - an unknown COUNTRY, ShortName "UNKNOWN" - so a strict match linked two launches to a country placeholder. Refused on both sides: here, and by excluding X and UNK from the org index.

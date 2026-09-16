@@ -36,14 +36,27 @@ and all five were NASA field centres.
 """
 from __future__ import annotations
 
+import pathlib
 import re
+from functools import lru_cache
 
 from sqlalchemy import text
 
 #: Tokens that differ between catalogues without changing the organisation.
+#: `technology`/`technologies` were added 2026-09-15, after a Launch
+#: Library survey missed Orienspace, LandSpace and ExPace - each of which
+#: GCAT carries under a name ending in "Technology" that the provider
+#: does not use.
+#:
+#: MEASURED BEFORE ADDING, because a noise word merges organisations and
+#: a merge is silent. Across GCAT's 4,109 rows the number of normalised
+#: keys mapping to more than one org code went 330 -> 332. The three new
+#: collisions are same-entity variants (CASC6A and CASC6A1 are a parent
+#: and its child, both literally "Academy of Aerospace Propulsion
+#: Technology"). No distinct organisations were merged.
 _NOISE = re.compile(
     r"\b(inc|incorporated|llc|ltd|limited|corp|corporation|co|company|"
-    r"gmbh|plc|sa|ab|bv|the|of|and)\b\.?", re.I)
+    r"gmbh|plc|sa|ab|bv|the|of|and|technology|technologies)\b\.?", re.I)
 
 #: Agency prefixes that one catalogue carries and the other does not.
 _AGENCY_PREFIX = re.compile(
@@ -57,7 +70,8 @@ _AGENCY_PREFIX = re.compile(
 #: of an organisation that is already there. A version the importer can
 #: record and compare is the difference between that being detectable and
 #: being a slow leak of near-identical rows.
-NORM_VERSION = 1
+#: 2 as of 2026-09-15: `technology`/`technologies` joined the noise list.
+NORM_VERSION = 2
 
 
 def norm(s: "str | None") -> str:
@@ -75,6 +89,17 @@ def norm_relaxed(s: "str | None") -> str:
     return _AGENCY_PREFIX.sub("", norm(s)).strip()
 
 
+#: GCAT's own placeholders, which are not organisations.
+#:
+#: `X` is Type CY - an unknown COUNTRY - with ShortName "UNKNOWN". `UNK`
+#: is a similar catch-all. Left in the index they match any source that
+#: writes "Unknown" for a missing value, which Launch Library 2 does:
+#: two upcoming launches would have been attributed to a country
+#: placeholder, plausibly and wrongly. Found 2026-09-15 by reading the
+#: row instead of trusting the match.
+PLACEHOLDER_CODES = frozenset({"X", "UNK"})
+
+
 def load_org_index(conn) -> "tuple[dict, dict]":
     """
     Two indexes over `organizations`: strict, and agency-prefix-stripped.
@@ -90,6 +115,8 @@ def load_org_index(conn) -> "tuple[dict, dict]":
           FROM organizations
     """))
     for code, eng, nat, short in rows:
+        if code in PLACEHOLDER_CODES:
+            continue
         for candidate in (eng, nat, short):
             k = norm(candidate)
             if k:
@@ -100,7 +127,50 @@ def load_org_index(conn) -> "tuple[dict, dict]":
     return strict, relaxed
 
 
-def match_org(name: "str | None", strict: dict, relaxed: dict) -> tuple:
+#: Curated name -> org code decisions, and the deliberate refusals.
+#: A seed file in the repository rather than a table, for AD-052's
+#: reason: a curated judgement belongs where it shows up in a diff, not
+#: where it can be UPDATEd at 2am.
+ALIAS_FILE = (pathlib.Path(__file__).resolve().parent.parent.parent
+              / "data" / "seed" / "org_aliases.tsv")
+
+
+@lru_cache(maxsize=1)
+def load_aliases() -> "dict[str, str | None]":
+    """
+    -> {normalised alias: org code}, with None meaning REFUSED.
+
+    A refusal is as much a decision as a match and is stored the same
+    way, because the alternative is that someone helpfully "fixes" it
+    later. The file records why for each one.
+
+    The refusals are not hypothetical. The nearest GCAT row to "China
+    Aerospace Science and Technology Corporation" is CASIC - China
+    Aerospace Science and INDUSTRY Corporation, a different company. A
+    fuzzy matcher, or an alias added without reading the row, would have
+    attributed ten launches to the wrong organisation silently.
+    """
+    out: "dict[str, str | None]" = {}
+    if not ALIAS_FILE.is_file():
+        return out
+    for line in ALIAS_FILE.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        alias, code, decision = (p.strip() for p in parts[:3])
+        if alias.lower() == "alias":            # header
+            continue
+        key = norm(alias)
+        if not key:
+            continue
+        out[key] = code if decision == "match" and code not in ("", "-") else None
+    return out
+
+
+def match_org(name: "str | None", strict: dict, relaxed: dict,
+              aliases: "dict | None" = None) -> tuple:
     """
     -> (code, how) where `how` is 'strict' | 'agency_prefix_stripped' | None.
 
@@ -126,6 +196,15 @@ def match_org(name: "str | None", strict: dict, relaxed: dict) -> tuple:
     key = norm(name)
     if not key:
         return None, None
+
+    # A curated decision outranks every rule below it, INCLUDING a
+    # refusal. `aliases` defaults to the seed file; pass {} to match
+    # without it.
+    al = load_aliases() if aliases is None else aliases
+    if key in al:
+        code = al[key]
+        return (code, "alias") if code else (None, None)
+
     code = strict.get(key)
     if code:
         return code, "strict"

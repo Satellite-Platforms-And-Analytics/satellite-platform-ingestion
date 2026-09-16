@@ -207,14 +207,39 @@ def test_public_roles_hold_nothing_beyond_select(conn):
 
 
 def test_readable_tables_have_a_policy(conn):
-    """RLS with no policy is deny-all — safe, and silent."""
+    """
+    RLS with no policy is deny-all — safe, and silent.
+
+    TABLES ONLY, and the filter is the point. A VIEW has no policies of
+    its own: with `security_invoker = true` it enforces the policies of
+    the tables underneath it, against the caller. Asking `pg_policies`
+    about a view therefore always comes back empty, which is not a
+    finding.
+
+    Without the filter this reported six relations on 2026-09-15 —
+    organization_activity, organization_production,
+    organization_production_summary, research_activity_by_area,
+    research_organization_summary, satellite_field_conflicts — every one
+    of them a view, and every one of them already covered by assertion 4,
+    which passed. A check that cries wolf on six correct objects is one
+    people learn to skip, and it was one migration away from hiding a
+    real seventh.
+
+    Assertion 1 has always filtered `relkind = 'r'`; this one did not,
+    which is the whole defect.
+    """
     from sqlalchemy import text
     rows = list(conn.execute(text("""
         SELECT DISTINCT g.table_name
           FROM information_schema.role_table_grants g
+          JOIN pg_class c ON c.relname = g.table_name
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+                             AND n.nspname = g.table_schema
          WHERE g.table_schema = 'public'
            AND g.grantee = 'anon'
            AND g.privilege_type = 'SELECT'
+           AND c.relkind = 'r'
+           AND c.relrowsecurity
            AND NOT EXISTS (
                SELECT 1 FROM pg_policies p
                 WHERE p.schemaname = 'public'
