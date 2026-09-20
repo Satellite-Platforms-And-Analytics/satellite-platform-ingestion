@@ -24,11 +24,26 @@ REM  written. Two batches in one hour is how an account gets suspended,
 REM  and the standing rule on this project is that no account is ever put
 REM  at risk.
 REM
-REM  INSTALL (once, from an elevated prompt):
+REM  INSTALL (once). No elevation needed - this is a per-user task, and
+REM  that is deliberate: a per-user task inherits the logged-on account,
+REM  so it needs no stored password. It also only runs while that user is
+REM  logged on, which is the trade. On a workstation that is left on,
+REM  that is the right side of the trade; storing a password in the task
+REM  scheduler to buy a few extra hours is not.
 REM
 REM    schtasks /Create /TN "TechPort import" /TR ^
 REM      "D:\Projects\Satellite-Platform\satellite-platform-ingestion\techport_import.cmd" ^
 REM      /SC HOURLY /ST 00:20
+REM
+REM  VERIFY it is installed and will fire:
+REM
+REM    schtasks /Query /TN "TechPort import" /V /FO LIST
+REM
+REM  PROVE IT RUNS before trusting the schedule - run it by hand once and
+REM  read the log, rather than finding out at 00:20:
+REM
+REM    schtasks /Run /TN "TechPort import"
+REM    Get-Content D:\Databases\satellite\archive\techport_import.log -Tail 30
 REM
 REM  REMOVE when the import finishes:
 REM
@@ -39,11 +54,15 @@ setlocal
 set REPO=D:\Projects\Satellite-Platform\satellite-platform-ingestion
 set LOG=D:\Databases\satellite\archive\techport_import.log
 
-REM The same conda environment the interactive tool uses. Hardcoded
-REM rather than inherited: a scheduled task starts with a bare
-REM environment, and "it works in my shell" is not evidence about a task
-REM running as SYSTEM at 00:20.
-set PY=%USERPROFILE%\anaconda3\envs\satellite-base\python.exe
+REM The same conda environment the interactive tool uses. Genuinely
+REM hardcoded - the first version of this line read
+REM %USERPROFILE%\anaconda3\... directly beneath a comment claiming the
+REM path was hardcoded rather than inherited. USERPROFILE is inherited.
+REM Run as SYSTEM it expands to C:\Windows\system32\config\systemprofile,
+REM python is not found, and this logs the same error every hour forever
+REM while looking like it ran. "It works in my shell" is not evidence
+REM about a task running unattended at 00:20.
+set PY=C:\Users\toddl\anaconda3\envs\satellite-base\python.exe
 
 if not exist "%PY%" (
     echo %DATE% %TIME% ERROR: python not found at %PY% >> "%LOG%"
