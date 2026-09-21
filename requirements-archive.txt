@@ -10,5 +10,5 @@
 # because both genuinely need it and the groups are installed
 # independently - a package used by two consumers belongs in both lists,
 # not in whichever one happens to be installed first.
-pandas>=2.0.0
-pyarrow>=15.0.0
+pandas>=3.0.6
+pyarrow>=25.0.1
