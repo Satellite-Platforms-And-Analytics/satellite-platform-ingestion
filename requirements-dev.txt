@@ -4,6 +4,6 @@
 #
 # pytest-asyncio was in the root requirements.txt and there is not one
 # async test in this repository. Removed rather than carried.
-pytest>=8.0.0
-ruff>=0.4.0
-mypy>=1.10.0
+pytest>=9.1.1
+ruff>=0.16.8
+mypy>=2.3.1
