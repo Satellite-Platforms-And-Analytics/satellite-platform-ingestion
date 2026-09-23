@@ -92,7 +92,8 @@ def parse(text: str) -> list[dict]:
     return runs
 
 
-def health(runs: list[dict], now: datetime, max_age_h: float):
+def health(runs: list[dict], now: datetime, max_age_h: float,
+           in_flight_min: float = 35.0):
     """Return (ok, headline, notes). Never judges by exit code alone."""
     notes: list[str] = []
     if not runs:
@@ -116,9 +117,14 @@ def health(runs: list[dict], now: datetime, max_age_h: float):
     # minutes. Reported as a failure on 2026-09-23 against a healthy run
     # 90 seconds old -- the exact cry-wolf this file's docstring warns
     # about. Age is what separates the two.
-    IN_FLIGHT_MIN = 10
+    # 35 minutes, from measurement rather than taste: the 09-19 23:20 run
+    # spent 1,497 requests and the next banner is at 23:44 -- 24 minutes
+    # for a full batch. The first value here was 10, which is SHORTER THAN
+    # A NORMAL RUN, so it would have called a healthy import dead at
+    # minute 11. Still well inside the hourly cadence, so a genuinely dead
+    # run is caught before the next trigger fires.
     body_less = last["lines"] <= 1
-    if body_less and age.total_seconds() / 60 <= IN_FLIGHT_MIN:
+    if body_less and age.total_seconds() / 60 <= in_flight_min:
         notes.append("running now — output is buffered until python flushes; "
                      "re-check in a few minutes")
         return True, (f"started {last['started']:%H:%M} "
@@ -241,18 +247,20 @@ def self_test() -> int:
     if not any("7,500 of 19,684" in n for n in notes):
         f.append(f"progress lost when the run was cut short: {notes}")
 
-    # a banner with no body, 6 minutes old, is a run IN FLIGHT
-    ok, head, notes = health(parse(FIXTURE_DEAD),
-                             datetime(2026, 9, 19, 23, 50), 2)
-    if not ok or "in flight" not in head:
-        f.append("a run 6 minutes old was called dead — it is still running, "
-                 "and this is the cry-wolf the docstring warns about")
+    # A full batch takes ~24 minutes and buffers its output, so a
+    # body-less run must stay green well past that. 6 and 20 minutes are
+    # both alive; 45 is not.
+    for mins in (6, 20):
+        when = datetime(2026, 9, 19, 23, 44) + timedelta(minutes=mins)
+        ok, head, _ = health(parse(FIXTURE_DEAD), when, 2)
+        if not ok or "in flight" not in head:
+            f.append(f"a run {mins} minutes old was called dead — a full "
+                     f"batch takes about 24 minutes")
 
-    # the same banner, 40 minutes old, is a run that produced nothing
     ok, head, _ = health(parse(FIXTURE_DEAD),
-                         datetime(2026, 9, 20, 0, 24), 2)
+                         datetime(2026, 9, 20, 0, 29), 2)
     if ok or "NO output" not in head:
-        f.append("a body-less run 40 minutes old was not reported as dead")
+        f.append("a body-less run 45 minutes old was not reported as dead")
 
     # progress arithmetic
     _, _, notes = health(parse(FIXTURE_QUOTA), datetime(2026, 9, 19, 23, 50), 2)
@@ -271,6 +279,9 @@ def main() -> int:
     ap.add_argument("--log", default=str(LOG))
     ap.add_argument("--max-age", type=float, default=2.0,
                     help="hours since the last run before this goes red")
+    ap.add_argument("--in-flight", type=float, default=35.0,
+                    help="minutes a run may show no output before it is "
+                         "called dead (a full batch takes about 24)")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
@@ -285,7 +296,8 @@ def main() -> int:
         return 1
 
     runs = parse(path.read_text(encoding="utf-8", errors="replace"))
-    ok, headline, notes = health(runs, datetime.now(), args.max_age)
+    ok, headline, notes = health(runs, datetime.now(), args.max_age,
+                                 args.in_flight)
 
     print(f"{'OK  ' if ok else 'STALE'}  {headline}")
     for n in notes:

@@ -76,7 +76,14 @@ cd /d "%REPO%" || (
 
 echo. >> "%LOG%"
 echo ======== %DATE% %TIME% ======== >> "%LOG%"
-"%PY%" -m src.catalog.seed_techport --apply --limit 1500 >> "%LOG%" 2>&1
+REM -u is not cosmetic. Redirected to a file, python block-buffers
+REM stdout, so a 24-minute run writes NOTHING until it finishes and
+REM then dumps everything at once. That makes a healthy run
+REM indistinguishable from a script that died on its first line for
+REM the whole time it is working - which is exactly the question
+REM check_import.py exists to answer. Unbuffered, progress appears as
+REM it happens.
+"%PY%" -u -m src.catalog.seed_techport --apply --limit 1500 >> "%LOG%" 2>&1
 echo exit=%ERRORLEVEL% >> "%LOG%"
 
 REM A finished import says so in its own words. Grep for it rather than
