@@ -100,30 +100,119 @@ def norm_relaxed(s: "str | None") -> str:
 PLACEHOLDER_CODES = frozenset({"X", "UNK"})
 
 
-def load_org_index(conn) -> "tuple[dict, dict]":
+#: Which name form may claim a key, best first. A SHORT name is a
+#: nickname, not a legal identity: 164 of the 332 colliding keys found on
+#: 2026-10-12 were claimed only by name_short values.
+_FORM_RANK = {"name_english": 0, "name_native": 1, "name_short": 2}
+
+
+def load_org_index(conn, report: bool = False) -> "tuple[dict, dict]":
     """
     Two indexes over `organizations`: strict, and agency-prefix-stripped.
 
     Kept apart so a caller can report what the looser rule buys. A merged
     index would report one rate and hide that most of it came from a rule
     nobody has agreed to.
+
+    THE COLLISION FIX, 2026-10-12
+    =============================
+    This function used to do:
+
+        for candidate in (eng, nat, short):
+            strict.setdefault(norm(candidate), code)
+
+    with no ORDER BY on the SELECT. `setdefault` means FIRST WRITER WINS,
+    and without an ORDER BY the first writer is whatever order the heap
+    returns -- so the answer could change after a vacuum or an update,
+    and the loser was discarded without a word while `match_method`
+    recorded 'strict' beside the winner. The result did not merely hide a
+    loosening; it misstated it.
+
+    Measured before changing anything: of 8,538 distinct keys over 4,108
+    rows, **332 were claimed by more than one code**, 164 of those by
+    name_short values alone, and 217 involved a subsidiary.
+
+    The case that found it: `norm("THE BOEING COMPANY")` is 'boeing', and
+    five codes claim that key --
+
+        BLS   name_short  Boeing   parent=BOHB   <-- heap order won
+        BO2   name_short  Boeing   parent=BOE
+        BOC   name_short  Boeing   parent=BOE
+        BOE   name_native Boeing Co.
+        BOE   name_short  Boeing
+
+    BLS is Boeing Launch Services, whose own name carries GCAT's
+    uncertainty marker. **BOE, the parent, was in the index and lost.**
+    $22.65bn of ISS obligations was one `--apply` away from being
+    attributed one level below the company that was awarded it, with the
+    value perfectly correct -- AD-101's defect in the form nothing
+    downstream catches.
+
+    So a key is now resolved by a stated preference rather than by luck:
+
+        1. fuller name form first  (english < native < short)
+        2. then the top of the corporate tree  (parent_code IS NULL)
+        3. then code, so the result is STABLE and reproducible
+
+    Rule 2 is what saves Boeing: all four claimants there tie at
+    name_short, and only BOE has no parent.
+
+    DELIBERATELY NOT FIXED HERE
+    ===========================
+    `name_short` still claims STRICT keys. Removing it would change match
+    rates for every importer that uses this index -- including the
+    TechPort and research-organisation figures recorded on 09-14 under
+    AD-062 and AD-083 -- and those numbers would have to be re-measured
+    before anyone could say whether the change helped. Measuring first is
+    the rule (AD-106); this commit makes the index defined and stable,
+    and leaves that question open rather than answering it blind.
+
+    A consequence worth stating: `organization_code` values written
+    BEFORE today came from the heap-order index. Some of them are
+    subsidiaries chosen by luck. Nothing here rewrites them.
+
+    `report=True` prints how many keys needed the preference order. A
+    collision that is resolved silently is how this survived a month.
     """
-    strict: dict = {}
-    relaxed: dict = {}
+    s_cand: dict = {}
+    r_cand: dict = {}
     rows = conn.execute(text("""
-        SELECT code, name_english, name_native, name_short
+        SELECT code, name_english, name_native, name_short, parent_code
           FROM organizations
-    """))
-    for code, eng, nat, short in rows:
+         ORDER BY code
+    """)).all()
+    for code, eng, nat, short, parent in rows:
         if code in PLACEHOLDER_CODES:
             continue
-        for candidate in (eng, nat, short):
-            k = norm(candidate)
+        for kind, cand in (("name_english", eng),
+                           ("name_native", nat),
+                           ("name_short", short)):
+            if not cand:
+                continue
+            score = (_FORM_RANK[kind], 1 if parent else 0, code)
+            k = norm(cand)
             if k:
-                strict.setdefault(k, code)
-            r = norm_relaxed(candidate)
+                s_cand.setdefault(k, []).append((score, code))
+            r = norm_relaxed(cand)
             if r:
-                relaxed.setdefault(r, code)
+                r_cand.setdefault(r, []).append((score, code))
+
+    def _resolve(cand: dict) -> "tuple[dict, int]":
+        out, collided = {}, 0
+        for k, lst in cand.items():
+            lst.sort()
+            out[k] = lst[0][1]
+            if len({c for _s, c in lst}) > 1:
+                collided += 1
+        return out, collided
+
+    strict, n_strict = _resolve(s_cand)
+    relaxed, n_relaxed = _resolve(r_cand)
+
+    if report:
+        print(f"  org index: {len(rows)} rows, {len(strict)} strict keys, "
+              f"{n_strict} decided by the preference order "
+              f"({n_relaxed} relaxed)")
     return strict, relaxed
 
 

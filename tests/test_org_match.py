@@ -23,6 +23,7 @@ from __future__ import annotations
 import pytest
 
 from src.catalog.org_match import (
+    load_org_index,
     NORM_VERSION, PLACEHOLDER_CODES, load_aliases, match_org, norm,
     norm_relaxed,
 )
@@ -229,3 +230,100 @@ def test_norm_version_was_bumped_with_the_rules() -> None:
     duplicate of a row that is already there.
     """
     assert NORM_VERSION >= 2
+
+
+# ── load_org_index's collision resolution (added 2026-10-12) ──────────
+#
+# Nothing above touches load_org_index: every test here hands match_org a
+# literal dict. So the index build -- the part that decides WHICH code a
+# colliding name resolves to -- had no test at all, and for a month it
+# resolved collisions by `setdefault` over an unordered SELECT. 332 of
+# 8,538 keys were decided that way, and one of them sent "THE BOEING
+# COMPANY" to Boeing Launch Services while the parent sat in the index
+# and lost.
+#
+# An undefined behaviour cannot regress, which is exactly why it survived.
+
+
+class _StubRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _StubConn:
+    """Enough of a connection for load_org_index. No database.
+
+    The real SELECT now carries ORDER BY code, so a stub that returns
+    rows in a different order than it was given would hide the very
+    instability these tests are about. This one returns them verbatim,
+    and the tests shuffle on purpose.
+    """
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def execute(self, *_a, **_k):
+        return _StubRows(self.rows)
+
+
+#: (code, name_english, name_native, name_short, parent_code)
+#: The real Boeing collision, trimmed to the rows that claim 'boeing'.
+_BOEING = [
+    ("BLS", None, "Boeing Launch Services (?)", "Boeing", "BOHB"),
+    ("BO2", None, "Boeing Satellite Systems", "Boeing", "BOE"),
+    ("BOC", None, "Boeing (Chicago)", "Boeing", "BOE"),
+    ("BOE", None, "Boeing Co.", "Boeing", None),
+]
+
+
+def test_a_parent_beats_its_own_subsidiaries_on_a_shared_short_name():
+    """THE ONE THAT MATTERS.
+
+    All four rows carry name_short "Boeing", so the name form cannot
+    separate them; only parentage can. Before the fix this returned BLS
+    -- Boeing Launch Services, whose own name carries GCAT's uncertainty
+    marker -- and $22.65bn of ISS obligations was one --apply away from
+    being filed one level below the company that was awarded it.
+    """
+    strict, _ = load_org_index(_StubConn(_BOEING))
+    assert strict[norm("THE BOEING COMPANY")] == "BOE", (
+        "a subsidiary outranked its own parent on a shared short name")
+
+
+def test_the_winner_does_not_depend_on_row_order():
+    """The old index had no ORDER BY, so the answer could change after a
+    vacuum. Any permutation must now give the same code."""
+    import itertools
+    seen = {load_org_index(_StubConn(list(p)))[0][norm("Boeing")]
+            for p in itertools.permutations(_BOEING)}
+    assert seen == {"BOE"}, f"row order changed the answer: {seen}"
+
+
+def test_a_fuller_name_form_outranks_a_short_one():
+    """A short name is a nickname. When one row spells the name out and
+    another merely abbreviates to it, the spelled-out row wins -- even
+    though the abbreviating row has no parent and would otherwise."""
+    rows = [
+        ("AAA", None, None, "Aurora", None),          # short only
+        ("BBB", "Aurora", None, "AUR", "PARENT"),     # english, subsidiary
+    ]
+    strict, _ = load_org_index(_StubConn(rows))
+    assert strict[norm("Aurora")] == "BBB"
+
+
+def test_a_placeholder_code_never_enters_the_index():
+    rows = [("X", "Unknown", None, "UNKNOWN", None)]
+    strict, relaxed = load_org_index(_StubConn(rows))
+    assert strict == {} and relaxed == {}
+
+
+def test_a_lone_name_still_resolves_to_itself():
+    """The positive control. Every assertion above is about which of
+    several codes wins; if the index stopped indexing uncontested names
+    at all, they would still pass."""
+    rows = [("ZZZ", None, "Entirely Unique Space Co.", "EUSC", None)]
+    strict, _ = load_org_index(_StubConn(rows))
+    assert strict[norm("Entirely Unique Space Co.")] == "ZZZ"

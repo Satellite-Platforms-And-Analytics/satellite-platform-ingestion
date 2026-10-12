@@ -309,3 +309,47 @@ as the above — **do that before any imagery fetching is automated.**
 3. Fix the cause before running again. Every incident so far has been a
    missing guard, not bad luck.
 4. Record it here.
+
+---
+
+## USAspending.gov — added 2026-10-12
+
+**Terms read 2026-10-05.** No authorization of any kind; the docs state
+plainly that endpoints do not currently require it. Data is public under
+the DATA Act, and the API repository is CC0-1.0.
+
+### There is no published rate limit, and that is the hazard
+
+Not in the API documentation, not in the
+`fedspendingtransparency/usaspending-api` README, nowhere. A third-party
+guide reports running 20 concurrent workers without a 429; that is
+**evidence about one author's afternoon, not a term of service**, and it
+is not a basis for anything.
+
+AD-060 governs: **an unpublished ceiling is found by hitting it.** So the
+ceiling is ours.
+
+| Control | Value | Where |
+|---|---|---|
+| Minimum interval between requests | 1.0s | `MIN_INTERVAL_S` |
+| Concurrency | 1 — never parallel | `Client.post` |
+| Hard cap per run | 40 requests | `--max-requests` |
+| Disk cache TTL | 7 days | `CACHE_TTL_S` |
+
+The cap is not a performance setting. It is there so a bug cannot spend
+a thousand calls while nobody is watching — the failure mode that took
+eight days to notice in the TechPort job (AD-099).
+
+### Pagination, and why a backfill must not use it
+
+`POST /api/v2/search/spending_by_award/` caps at 100 rows per page,
+about 10,000 records total, and degrades past offset 5,000. A real
+backfill uses `POST /api/v2/download/awards/` (up to 500,000 records per
+job) and is a separate piece of work. `--pages` on the ingester is for
+sampling, not for loading history.
+
+### Scope
+
+NAICS 336414 / 336415 / 336419, contract award types A-D. Grants and
+loans have different money semantics and are out of scope for the first
+pass rather than silently mixed in.

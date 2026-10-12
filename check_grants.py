@@ -161,6 +161,11 @@ PIPELINE_WRITE = (
     # simply does not look at it - the quiet way a check stops covering
     # what it claims to.
     "upcoming_launches",
+    # 021. Added 2026-10-12, SIX DAYS LATE, and found by Layer 1b rather
+    # than by anyone reading the warning three lines up. That warning was
+    # already here when this was forgotten, which is why the fix is the
+    # layer and not this line.
+    "cost_claims",
 )
 
 #: SELECT only. Their source of truth is a seed file in the repository,
@@ -233,6 +238,73 @@ def probe_role(conn, role: str) -> int:
         cells += "yes" if got["TRUNCATE"] else "-"
         mark = f"   <-- {', '.join(problems)}" if problems else ""
         print(f"  {t:<30}{cells}{mark}")
+
+    # ── Layer 1b: is the LIST still the whole list? ──────────────────
+    #
+    # PIPELINE_WRITE and PIPELINE_READ_ONLY are hand-maintained, and the
+    # comment beside `upcoming_launches` already said it: "a table added
+    # after 019 needs adding HERE too, or the control simply does not
+    # look at it - the quiet way a check stops covering what it claims
+    # to."
+    #
+    # Then 021 added `cost_claims` and nobody added it. On 2026-10-12
+    # this control printed "0 violation(s)" over 16 writable tables while
+    # a 17th sat in the database, granted, policied and unexamined - and
+    # the run was being used to close AD-065. The warning was written and
+    # then not followed, which is AD-098 restated: **writing down a
+    # failure mode is not the same as avoiding it.**
+    #
+    # The header of this file already claims the right design - "two
+    # independent statements of the same intent; a disagreement between
+    # them is itself the finding." The second statement was missing. It
+    # is the database, and this is the diff.
+    listed = set(PIPELINE_WRITE) | set(PIPELINE_READ_ONLY)
+    granted_tables = {r[0] for r in conn.execute(text("""
+        SELECT DISTINCT g.table_name
+          FROM information_schema.role_table_grants g
+          JOIN information_schema.tables t
+            ON t.table_schema = g.table_schema
+           AND t.table_name = g.table_name
+         WHERE g.table_schema = 'public' AND g.grantee = :r
+           AND t.table_type = 'BASE TABLE'
+    """), {"r": role})}
+    granted_views = {r[0] for r in conn.execute(text("""
+        SELECT DISTINCT g.table_name
+          FROM information_schema.role_table_grants g
+          JOIN information_schema.tables t
+            ON t.table_schema = g.table_schema
+           AND t.table_name = g.table_name
+         WHERE g.table_schema = 'public' AND g.grantee = :r
+           AND t.table_type = 'VIEW'
+    """), {"r": role})}
+    policied = {r[0] for r in conn.execute(text("""
+        SELECT DISTINCT tablename FROM pg_policies
+         WHERE schemaname = 'public' AND :r = ANY(roles)
+    """), {"r": role})}
+
+    print(f"\n  IS THE LIST STILL THE WHOLE LIST?")
+    unlisted = sorted((granted_tables | policied) - listed)
+    for t in unlisted:
+        why = []
+        if t in granted_tables:
+            why.append("granted")
+        if t in policied:
+            why.append("policied")
+        print(f"  {t:<30}<-- {' and '.join(why)} for `{role}`, and absent "
+              f"from this file's lists")
+    if unlisted:
+        bad += len(unlisted)
+        print("  Nothing above examined these. Add each to PIPELINE_WRITE "
+              "or PIPELINE_READ_ONLY.")
+    else:
+        print(f"  {len(listed)} listed, and nothing granted or policied "
+              f"for `{role}` is missing from them")
+    # Views are reported, never counted: a view holds no policies of its
+    # own and these lists are about tables. But a view granted to the
+    # pipeline is still surface area, so it is named rather than hidden.
+    if granted_views:
+        print(f"  views granted to `{role}` (informational, not counted): "
+              f"{', '.join(sorted(granted_views))}")
 
     # ── Layer 2: a policy, or the grant is decorative ────────────────
     policies = {r[0] for r in conn.execute(text("""
