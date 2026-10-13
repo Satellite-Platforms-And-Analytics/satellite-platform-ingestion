@@ -61,6 +61,29 @@
 # REFUSED 2026-10-13: Federal Register, SEC agency id 466. Access-gated.
 # https://www.federalregister.gov/articles/search.rss?conditions%5Bagency_ids%5D%5B%5D=466
 #
+# SOURCES CHECKED AND NOT ADDED, 2026-10-14. Recorded so nobody looks
+# twice, because "I could not find a feed" and "there is no feed" are
+# different findings and only one of them is worth writing down:
+#
+#   CelesTrak      NO FEED EXISTS. celestrak.org links no RSS or Atom;
+#                  it says "Follow @TSKelso and @CelesTrak on Bluesky".
+#                  It also says "Please be sure to adhere to our usage
+#                  policy when retrieving any CelesTrak data", and this
+#                  project already reads CelesTrak elsewhere, so the
+#                  answer is not to synthesise a feed from a social
+#                  account.
+#   FCC            Daily Digest is EMAIL ONLY - "You can have the Digest
+#                  emailed to you daily" - and www.fcc.gov/rss returned
+#                  a client error. No feed URL to add. The Digest is the
+#                  publisher's own route and a person can subscribe to
+#                  it; a mailbox is not this module's business.
+#   ESA            esa.int/Services/RSS_Feeds says the list "is
+#                  available on the right" and the sidebar did not
+#                  render to the fetcher. The feeds exist; their URLs
+#                  were not READ. Open one in a browser, then --check.
+#
+# Nothing above is written in as a guess. That is the whole rule here.
+#
 key	url	cap	cadence_claimed	stale_after_hours	window	verified	verified_on	basis
 sec_press	https://www.sec.gov/news/pressreleases.rss	POLICY	unstated	336		yes	2026-10-13	SEC press releases. Enforcement and rule changes that move a filer's disclosure obligations, which is upstream of every number sec_edgar.py reads. Carries no lastBuildDate, so it reports UNDATED and the threshold is nominal.
 sec_litigation	https://www.sec.gov/enforcement-litigation/litigation-releases/rss	POLICY	unstated	336		yes	2026-10-13	SEC litigation releases. A filer under enforcement is a filer whose reported figures may be restated, and a restatement is a competing claim rather than a correction. Also carries no lastBuildDate.
@@ -70,3 +93,4 @@ nasa_news	https://www.nasa.gov/news-release/feed/	EVENT	unstated	168		yes	2026-1
 nasa_technology	https://www.nasa.gov/technology/feed/	TECH	unstated	720		yes	2026-10-13	NASA technology news, adjacent to the TechPort TRL data already ingested. Measured 10 days between builds on 10-13, which is normal for a topical feed and is why the threshold is 30 days rather than a week.
 nasa_jpl	https://www.nasa.gov/centers-and-facilities/jpl/feed/	EVENT	unstated	720		yes	2026-10-13	JPL centre news, the highest spacecraft-per-release rate of any NASA centre feed. Measured 4 days between builds, so it gets the topical threshold rather than the news one.
 nasa_all	https://www.nasa.gov/feed/	EVENT	unstated	168		yes	2026-10-13	NASA recently-published content, all of it. Kept as the fallback if the topical feeds prove too narrow; expected to be noisy, and its build time tracked nasa_news exactly on 10-13.
+arxiv_space	https://rss.arxiv.org/rss/astro-ph.IM+physics.space-ph	TECH	daily at midnight EST	72		yes	2026-10-13	arXiv instrumentation-and-methods plus space-physics preprints, one combined feed so it costs one request. Upstream of the TechPort TRL data: a sensor or propulsion method appears here years before it has a TRL. Terms read at info.arxiv.org/help/api/tou.html 2026-10-14 - 1 req/3s across all machines, which is why MIN_INTERVAL_S is 3.0. 72h because arXiv does not announce every night and this project has not read which nights, so no window is claimed.

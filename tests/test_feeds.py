@@ -464,3 +464,28 @@ def test_check_accepts_a_real_feed_without_writing_anything(capsys):
     out = capsys.readouterr().out
     assert "2 item(s)" in out and "lastBuildDate" in out
     assert watch.SEED.read_text(encoding="utf-8") == before
+
+
+def test_the_rate_floor_matches_the_strictest_rule_any_source_publishes():
+    """arXiv's API terms, read at info.arxiv.org/help/api/tou.html on
+    2026-10-14: "make no more than one request every three seconds, and
+    limit requests to a single connection at a time", applying to "all
+    of the machines under your control as a whole".
+
+    MIN_INTERVAL_S was 2.0 before arXiv was added, which would have
+    been a violation on the second arXiv request of any run. One global
+    floor set at the strictest published rule cannot be undercut by a
+    feed added later inheriting a faster default - the alternative, a
+    per-host table of exceptions, is a thing somebody forgets to update
+    (AD-109)."""
+    assert watch.MIN_INTERVAL_S >= 3.0, (
+        "arXiv publishes 1 request / 3 seconds; a faster floor breaks it")
+
+
+def test_a_registry_feed_on_arxiv_is_covered_by_that_floor():
+    feeds = {f.key: f for f in watch.read_registry()}
+    arxiv = [f for f in feeds.values() if "arxiv" in f.host]
+    assert arxiv, "the arXiv row is gone; is the 3s floor still justified?"
+    for f in arxiv:
+        assert "info.arxiv.org/help/api/tou" in f.basis, (
+            f"{f.key}'s basis must name where its terms were read")

@@ -663,3 +663,49 @@ contains no reference to `src.db`, `sqlalchemy`, `cost_claims` or
 | `--raw <key>` | 1 (+robots) | none — for diagnosing a fault |
 | `--verify [--apply]` | 1 per feed | `verified`/`verified_on` only, with `--apply` |
 | `--poll [--dry-run]` | 1 per feed, usually 304 | the seen-id state only |
+
+### Growing the registry — 2026-10-14
+
+Four candidates read from their publishers' own pages. **One was added.**
+
+**arXiv — added, and it changed a constant.** Feed base read at
+`info.arxiv.org/help/rss.html`: `https://rss.arxiv.org/rss/<category>`,
+RSS 2.0 or Atom, *"Feeds are updated daily at midnight Eastern Standard
+Time"*, several categories joinable with `+`. One row,
+`astro-ph.IM+physics.space-ph`, so it costs one request — upstream of
+the TechPort TRL data, since a sensor or propulsion method appears
+there years before it has a TRL.
+
+That page says *"Please review the Terms of Use for arXiv APIs before
+using the arXiv RSS feeds"*, and the terms say:
+
+> make no more than one request every three seconds, and limit requests
+> to a single connection at a time
+
+applying to *"all of the machines under your control as a whole"*, with
+*"Attempt to circumvent rate limits"* listed as prohibited.
+
+`MIN_INTERVAL_S` was **2.0**. That is a violation on the second arXiv
+request of any run. It is now **3.0** — one global floor at the
+strictest rule any source in the registry publishes, because a
+per-host exception table is a thing somebody forgets to update
+(AD-109), and the cost is about fifteen seconds a run. Nothing the SEC
+or NASA publishes asks for more. Worth remembering that "all machines
+under your control" means this floor is not the whole picture if
+anything else here polls arXiv.
+
+Its `stale_after_hours` is **72** with **no window**: arXiv does not
+announce every night, this project has not read which nights, and
+encoding a schedule we have not read is exactly AD-115.
+
+**Three checked and not added**, recorded in `feeds.tsv` so nobody
+looks twice — *"I could not find a feed"* and *"there is no feed"* are
+different findings:
+
+| Source | Finding |
+|---|---|
+| **CelesTrak** | **No feed exists.** The site links none and says *"Follow @TSKelso and @CelesTrak on Bluesky"*. It also says *"Please be sure to adhere to our usage policy when retrieving any CelesTrak data"*, and this project already reads CelesTrak elsewhere — so the answer is not to synthesise a feed from a social account |
+| **FCC** | Daily Digest is **email only** — *"You can have the Digest emailed to you daily"* — and `www.fcc.gov/rss` returned a client error. The Digest is the publisher's route and a person can subscribe; a mailbox is not this module's business |
+| **ESA** | Feeds exist, but `esa.int/Services/RSS_Feeds` says the list *"is available on the right"* and the sidebar did not render to the fetcher. The URLs were **not read**. Open it in a browser, then `--check` |
+
+Nothing above went in as a guess. That is the whole rule.

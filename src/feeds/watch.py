@@ -116,7 +116,23 @@ STATE = CACHE_DIR / "state.json"
 
 #: Minimum seconds between two requests to the SAME host. Overridden
 #: upward, never downward, by a Crawl-delay in that host's robots.txt.
-MIN_INTERVAL_S = 2.0
+#:
+#: 3.0 because that is the STRICTEST published rule among the sources in
+#: the registry, and a single floor at the strictest rule cannot be
+#: undercut by a feed added later that inherits a faster default. The
+#: rule is arXiv's, read at info.arxiv.org/help/api/tou.html on
+#: 2026-10-14: "make no more than one request every three seconds, and
+#: limit requests to a single connection at a time", and the limits
+#: "apply to all of the machines under your control as a whole". It was
+#: 2.0 until arXiv was added, which would have been a violation on the
+#: second arXiv request of any run. Nothing published by the SEC or NASA
+#: asks for more than this, so one number serves all of them and costs
+#: about fifteen seconds a run.
+#:
+#: The "all machines under your control" clause is worth remembering:
+#: if anything else on this network polls arXiv, this floor is not the
+#: whole picture.
+MIN_INTERVAL_S = 3.0
 
 #: Hard ceiling per run, robots.txt fetches included. Ten feeds plus
 #: four hosts' robots is 14; this leaves room without leaving room for
