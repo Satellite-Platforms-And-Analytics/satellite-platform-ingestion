@@ -99,8 +99,9 @@ def test_a_row_claiming_verified_without_a_date_is_refused(tmp_path):
     re-reading possible."""
     p = tmp_path / "feeds.tsv"
     p.write_text(
-        "key\turl\tcap\tcadence_minutes\tverified\tverified_on\tbasis\n"
-        "x\thttps://e.test/f.xml\tMONEY\t10\tyes\t\t"
+        "key\turl\tcap\tcadence_claimed\tstale_after_hours\twindow"
+        "\tverified\tverified_on\tbasis\n"
+        "x\thttps://e.test/f.xml\tMONEY\tunstated\t24\t\tyes\t\t"
         + "a basis long enough to clear the forty character floor\n",
         encoding="utf-8")
     with pytest.raises(SystemExit) as e:
@@ -111,8 +112,9 @@ def test_a_row_claiming_verified_without_a_date_is_refused(tmp_path):
 def test_an_http_feed_is_refused(tmp_path):
     p = tmp_path / "feeds.tsv"
     p.write_text(
-        "key\turl\tcap\tcadence_minutes\tverified\tverified_on\tbasis\n"
-        "x\thttp://e.test/f.xml\tMONEY\t10\tno\t\t"
+        "key\turl\tcap\tcadence_claimed\tstale_after_hours\twindow"
+        "\tverified\tverified_on\tbasis\n"
+        "x\thttp://e.test/f.xml\tMONEY\tunstated\t24\t\tno\t\t"
         + "a basis long enough to clear the forty character floor\n",
         encoding="utf-8")
     with pytest.raises(SystemExit) as e:
@@ -131,7 +133,12 @@ def test_writing_the_registry_keeps_its_documentation(tmp_path):
     feeds[0].verified, feeds[0].verified_on = "yes", "2026-10-13"
     watch.write_registry(feeds, p)
     after = p.read_text(encoding="utf-8")
-    assert "a feed URL recalled from memory is a guess" in after
+    # Count comment lines rather than look for one sentence. The first
+    # version of this test asserted a specific phrase and failed the
+    # moment the header was legitimately rewritten - a test that pins
+    # prose stops the documentation from being improved.
+    assert (len([l for l in after.splitlines() if l.startswith("#")])
+            == len([l for l in src.splitlines() if l.startswith("#")]) > 20)
     assert watch.read_registry(p)[0].verified == "yes"
     assert after.count("\n") == src.count("\n")
 
@@ -178,38 +185,141 @@ def test_an_html_error_page_is_not_a_feed():
                          "Exceeded</body></html>")
 
 
-# ── the check that is normally skipped ───────────────────────────────
+# ── staleness, rebuilt on what the first real run measured ──────────
 
-def test_a_feed_months_behind_its_own_stated_cadence_is_late():
-    """Built from the real measurement: three SEC feeds each describing
-    themselves as updated every ten minutes, last built in April and
-    February 2026, read on 2026-10-13."""
-    now = datetime(2026, 10, 13, tzinfo=timezone.utc)
-    channel = {"built": datetime(2026, 4, 24, 22, 50, tzinfo=timezone.utc)}
-    verdict, sentence = watch.staleness(channel, 10, now=now)
-    assert verdict == "LATE"
-    assert "not being updated" in sentence
+def _feed(stale_after_hours=20.0, window=""):
+    return watch.Feed(key="t", url="https://e.test/f.xml", cap="MONEY",
+                      cadence_claimed="every 10 min Mon-Fri 6am-10pm EST",
+                      stale_after_hours=stale_after_hours, window=window,
+                      verified="yes", verified_on="2026-10-13",
+                      basis="a basis long enough to clear the floor rule")
 
 
-def test_a_fresh_feed_inside_its_cadence_is_ok():
-    now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
-    channel = {"built": now - timedelta(minutes=12)}
-    assert watch.staleness(channel, 10, now=now)[0] == "ok"
+SEC_WINDOW = "Mon-Fri 06:00-22:00 America/New_York"
+
+
+def test_the_false_late_that_the_first_real_run_produced():
+    """THE regression test for this module.
+
+    At 23:34 ET on Monday 2026-10-12 the first version reported both SEC
+    XBRL feeds LATE. They had last been built at 21:50 ET - the last
+    ten-minute slot before the 10pm close the SEC publishes. The check
+    had kept "every ten minutes" and discarded "Monday through Friday,
+    6am - 10pm EST", then scored the publisher against a multiplier this
+    project invented. Nothing was wrong with the feeds.
+    """
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    built = datetime(2026, 10, 12, 21, 50, 3, tzinfo=et)
+    now = datetime(2026, 10, 12, 23, 34, 0, tzinfo=et)
+    verdict, sentence = watch.staleness(
+        {"built": built}, _feed(window=SEC_WINDOW), now=now)
+    assert verdict == "ok", sentence
+    assert "inside" in sentence
+
+
+def test_overnight_and_weekend_silence_is_not_silence():
+    """Friday 21:55 to Monday 07:00 is 57 wall-clock hours and one
+    in-window hour. Measuring against the wall clock makes every
+    Saturday look like an outage."""
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    built = datetime(2026, 10, 9, 21, 55, tzinfo=et)      # Friday
+    now = datetime(2026, 10, 12, 7, 0, tzinfo=et)         # Monday
+    assert (now - built).total_seconds() / 3600 > 57
+    inside = watch.open_seconds(built, now, SEC_WINDOW) / 3600
+    assert 1.0 <= inside <= 1.1, inside
+    assert watch.staleness({"built": built},
+                           _feed(window=SEC_WINDOW), now=now)[0] == "ok"
+
+
+def test_a_feed_that_really_stops_is_still_caught():
+    """The window must not become a blanket excuse. Two full in-window
+    weekdays of no rebuild is 32 hours and is reported."""
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    built = datetime(2026, 10, 7, 6, 5, tzinfo=et)        # Wednesday
+    now = datetime(2026, 10, 9, 21, 0, tzinfo=et)         # Friday
+    verdict, sentence = watch.staleness(
+        {"built": built}, _feed(window=SEC_WINDOW), now=now)
+    assert verdict == "LATE", sentence
+    assert "means nothing" in sentence
+
+
+def test_one_closed_weekday_does_not_trip_the_sec_threshold():
+    """Holidays are not modelled. The shipped threshold of 20h is
+    chosen so a single closed weekday - 16 in-window hours, which is
+    what Columbus Day 2026-10-12 would have looked like had the SEC
+    stopped rebuilding - cannot raise an alarm on its own."""
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    built = datetime(2026, 10, 9, 21, 55, tzinfo=et)      # Friday close
+    now = datetime(2026, 10, 12, 22, 0, tzinfo=et)        # Monday close
+    inside = watch.open_seconds(built, now, SEC_WINDOW) / 3600
+    assert 15.9 <= inside <= 16.1, inside
+    shipped = next(f for f in watch.read_registry()
+                   if f.key == "sec_xbrl_usgaap")
+    assert shipped.stale_after_hours > inside, (
+        "the shipped threshold would fire on one closed weekday")
+
+
+def test_item_age_is_not_checked_at_all():
+    """Both SEC feeds' newest ITEM on 10-13 was Friday 10-09, because
+    10-10 and 10-11 were the weekend and Monday 10-12 was Columbus Day,
+    a federal holiday on which EDGAR accepts no filings. A feed rebuilt
+    on time and correctly containing nothing is healthy, so staleness
+    reads lastBuildDate and never an item date."""
+    import inspect
+    src = inspect.getsource(watch.staleness)
+    assert "items" not in src and "published" not in src
 
 
 def test_a_feed_with_no_build_date_is_reported_as_uncheckable():
-    """Not 'ok'. A feed that cannot be checked for staleness is a
-    different thing from a feed that passed the check, and collapsing
-    the two is how an empty result starts sounding like a finding."""
-    verdict, sentence = watch.staleness({"built": None}, 0)
+    """Not 'ok'. Measured: both SEC news feeds carry no lastBuildDate,
+    so they are permanently uncheckable, and collapsing that into ok is
+    how an empty result starts sounding like a finding."""
+    verdict, sentence = watch.staleness({"built": None}, _feed())
     assert verdict == "UNDATED"
     assert "cannot be checked" in sentence
 
 
-def test_an_unstated_cadence_still_has_a_ceiling():
+def test_a_windowless_feed_counts_every_hour():
     now = datetime(2026, 10, 13, tzinfo=timezone.utc)
-    old = {"built": now - timedelta(days=200)}
-    assert watch.staleness(old, 0, now=now)[0] == "LATE"
+    old = {"built": now - timedelta(hours=200)}
+    assert watch.staleness(old, _feed(168.0), now=now)[0] == "LATE"
+    recent = {"built": now - timedelta(hours=100)}
+    assert watch.staleness(recent, _feed(168.0), now=now)[0] == "ok"
+
+
+def test_a_window_spec_that_cannot_be_parsed_is_refused_not_guessed():
+    """A guessed window silently stops counting hours a feed was
+    actually silent, which is worse than having no window."""
+    for bad in ("Mon-Fri 06:00-22:00", "Mon-Fri 6-10 America/New_York",
+                "Xxx-Fri 06:00-22:00 America/New_York",
+                "Mon-Fri 06:00-22:00 Mars/Olympus"):
+        with pytest.raises(SystemExit):
+            watch.parse_window(bad)
+    watch.parse_window(SEC_WINDOW)          # the real one still works
+
+
+def test_the_registry_demands_a_threshold_with_an_author(tmp_path):
+    """stale_after_hours is OURS. The publisher's claim sits beside it
+    in its own column so the two can never again be the same number by
+    accident."""
+    head = ("key\turl\tcap\tcadence_claimed\tstale_after_hours\twindow"
+            "\tverified\tverified_on\tbasis\n")
+    basis = "a basis long enough to clear the forty character floor"
+    p = tmp_path / "feeds.tsv"
+    p.write_text(head + f"x\thttps://e.test/f.xml\tMONEY\tunstated\t0\t"
+                 f"\tno\t\t{basis}\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as e:
+        watch.read_registry(p)
+    assert "died" in str(e.value)
+    p.write_text(head + f"x\thttps://e.test/f.xml\tMONEY\t\t24\t"
+                 f"\tno\t\t{basis}\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as e:
+        watch.read_registry(p)
+    assert "cadence_claimed" in str(e.value)
 
 
 # ── the guardrail ─────────────────────────────────────────────────────

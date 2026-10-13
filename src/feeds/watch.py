@@ -123,18 +123,18 @@ MIN_INTERVAL_S = 2.0
 #: a loop.
 DEFAULT_MAX_REQUESTS = 40
 
-#: How many of its own declared cadences a feed may fall behind before
-#: this module calls it broken. A feed claiming 10-minute updates is not
-#: interesting at 20 minutes late and is certainly interesting at an
-#: hour; 6 is the compromise, and the number is here rather than inline
-#: so that arguing with it means editing one line.
-STALE_FACTOR = 6
-
-#: For a feed whose publisher states no cadence, there is nothing to be
-#: late against, so silence is judged against this instead. Chosen to be
-#: longer than any plausible quiet spell at NASA and shorter than the
-#: six months the SEC's feeds were measured at.
-UNSTATED_CADENCE_STALE_DAYS = 30
+#: There is deliberately NO multiplier here any more.
+#:
+#: The first version derived its staleness threshold from the
+#: publisher's claimed cadence times six. Both halves of that were
+#: wrong on the first real run. The claimed cadence was taken from the
+#: phrase "updated every ten minutes" while the rest of the SEC's own
+#: sentence - "Monday through Friday, 6am - 10pm EST" - was dropped,
+#: and the multiplier was a number this project invented and then
+#: reported as though the publisher had been measured against their own
+#: rule. Each feed now carries an explicit stale_after_hours in the
+#: registry: a threshold with a visible author, informed by the
+#: publisher's claim and not equal to it. See AD-115.
 
 #: Keep the state file bounded. Per feed, remember this many item ids.
 #: The SEC feeds hold 200 items, so 500 survives several quiet runs
@@ -147,8 +147,9 @@ CAPS = {"OBJ", "ORG", "MONEY", "EVENT", "TECH", "POLICY"}
 # ── the registry ──────────────────────────────────────────────────────
 
 class Feed:
-    __slots__ = ("key", "url", "cap", "cadence_minutes",
-                 "verified", "verified_on", "basis")
+    __slots__ = ("key", "url", "cap", "cadence_claimed",
+                 "stale_after_hours", "window", "verified", "verified_on",
+                 "basis")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -180,12 +181,13 @@ def read_registry(path: pathlib.Path = SEED) -> "list[Feed]":
         parts = line.split("\t")
         if parts[0] == "key":
             continue
-        if len(parts) != 7:
+        if len(parts) != 9:
             raise SystemExit(
-                f"{path.name}:{lineno}: expected 7 tab-separated columns, "
+                f"{path.name}:{lineno}: expected 9 tab-separated columns, "
                 f"got {len(parts)}. A registry that parses loosely is a "
                 f"registry that silently drops a source.")
-        key, url, cap, cadence, verified, verified_on, basis = parts
+        (key, url, cap, cadence_claimed, stale_after, window, verified,
+         verified_on, basis) = parts
         if key in seen_keys:
             raise SystemExit(f"{path.name}:{lineno}: duplicate key {key!r}")
         seen_keys.add(key)
@@ -207,17 +209,33 @@ def read_registry(path: pathlib.Path = SEED) -> "list[Feed]":
                 f"{path.name}:{lineno}: {key} claims verified=yes with no "
                 f"date. A measurement without a date is a memory.")
         try:
-            cadence_i = int(cadence)
+            stale_h = float(stale_after)
         except ValueError:
             raise SystemExit(
-                f"{path.name}:{lineno}: cadence_minutes {cadence!r} is not "
-                f"an integer (0 means the publisher states none)")
+                f"{path.name}:{lineno}: stale_after_hours {stale_after!r} "
+                f"is not a number. This is OUR threshold, not the "
+                f"publisher's cadence, and every feed needs one stated.")
+        if stale_h <= 0:
+            raise SystemExit(
+                f"{path.name}:{lineno}: {key} has stale_after_hours "
+                f"{stale_h}. A feed with no staleness threshold cannot be "
+                f"distinguished from a feed that died.")
+        if window.strip():
+            parse_window(window)        # raises SystemExit on a bad spec
+        if not cadence_claimed.strip():
+            raise SystemExit(
+                f"{path.name}:{lineno}: {key} states no cadence_claimed. "
+                f"Write what the publisher says, verbatim enough to "
+                f"check, or 'unstated' - the threshold beside it is only "
+                f"reviewable against the claim it was chosen from.")
         if len(basis.strip()) <= 40:
             raise SystemExit(
                 f"{path.name}:{lineno}: {key}'s basis is too thin to "
                 f"review: {basis.strip()!r}")
         feeds.append(Feed(key=key, url=url, cap=cap,
-                          cadence_minutes=cadence_i, verified=verified,
+                          cadence_claimed=cadence_claimed.strip(),
+                          stale_after_hours=stale_h,
+                          window=window.strip(), verified=verified,
                           verified_on=verified_on.strip(),
                           basis=basis.strip()))
     if not feeds:
@@ -236,11 +254,11 @@ def write_registry(feeds: "list[Feed]", path: pathlib.Path = SEED) -> None:
     out = []
     for raw in path.read_text(encoding="utf-8").splitlines():
         parts = raw.split("\t")
-        if (not raw.startswith("#") and len(parts) == 7
+        if (not raw.startswith("#") and len(parts) == 9
                 and parts[0] in by_key):
             f = by_key[parts[0]]
-            parts[4] = f.verified
-            parts[5] = f.verified_on
+            parts[6] = f.verified
+            parts[7] = f.verified_on
             out.append("\t".join(parts))
         else:
             out.append(raw)
@@ -509,34 +527,124 @@ def parse_feed(body: str) -> "tuple[dict, list[dict]]":
 
 # ── the check that is normally skipped ────────────────────────────────
 
-def staleness(channel: dict, cadence_minutes: int,
+_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def parse_window(spec: str) -> "tuple[set[int], int, int, str]":
+    """Parse "Mon-Fri 06:00-22:00 America/New_York".
+
+    Returns (weekdays, open_minute, close_minute, tzname). Raises
+    SystemExit on anything it does not understand, because a window it
+    guesses at is worse than no window: it would silently stop counting
+    the hours a feed was actually silent.
+    """
+    bad = SystemExit(
+        f"bad window spec {spec!r}. Expected e.g. "
+        f"'Mon-Fri 06:00-22:00 America/New_York'")
+    parts = spec.split()
+    if len(parts) != 3:
+        raise bad
+    days, hours, tzname = parts
+    try:
+        d0, d1 = (d.strip().lower()[:3] for d in days.split("-"))
+        i0, i1 = _DAYS.index(d0), _DAYS.index(d1)
+        o, c = hours.split("-")
+        oh, om = (int(x) for x in o.split(":"))
+        ch, cm = (int(x) for x in c.split(":"))
+    except (ValueError, IndexError):
+        raise bad
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(tzname)
+    except Exception:
+        raise SystemExit(f"unknown time zone {tzname!r} in window {spec!r}")
+    wanted = set(range(i0, i1 + 1)) if i0 <= i1 else (
+        set(range(i0, 7)) | set(range(0, i1 + 1)))
+    return wanted, oh * 60 + om, ch * 60 + cm, tzname
+
+
+def open_seconds(a: datetime, b: datetime, spec: str) -> float:
+    """Seconds between a and b that fall INSIDE the window.
+
+    A publisher that only rebuilds a feed 6am-10pm on weekdays has not
+    gone quiet at midnight, and measuring silence against the wall clock
+    makes every Saturday look like an outage. Day-by-day rather than
+    clever, and capped, because a feed four years stale does not need
+    its downtime computed precisely - it needs to be reported.
+    """
+    if not spec:
+        return (b - a).total_seconds()
+    if b <= a:
+        return 0.0
+    from zoneinfo import ZoneInfo
+    days, open_m, close_m, tzname = parse_window(spec)
+    tz = ZoneInfo(tzname)
+    a_l, b_l = a.astimezone(tz), b.astimezone(tz)
+    if (b_l - a_l).days > 400:
+        return float("inf")
+    total = 0.0
+    day = a_l.date()
+    while day <= b_l.date():
+        if day.weekday() in days:
+            start = datetime.combine(day, datetime.min.time(), tzinfo=tz) \
+                + timedelta(minutes=open_m)
+            end = datetime.combine(day, datetime.min.time(), tzinfo=tz) \
+                + timedelta(minutes=close_m)
+            lo, hi = max(start, a_l), min(end, b_l)
+            if hi > lo:
+                total += (hi - lo).total_seconds()
+        day += timedelta(days=1)
+    return total
+
+
+def staleness(channel: dict, feed: "Feed",
               now: "datetime|None" = None) -> "tuple[str, str]":
     """(verdict, sentence). verdict is ok | LATE | UNDATED.
 
-    A feed that states its own cadence has volunteered the test. Three
-    SEC feeds describing themselves as "updated every 10 minutes" were
-    measured months behind on 2026-10-13; nothing in an item list says
-    so, and a watcher reporting "0 new" would have been both correct and
-    useless.
+    Measured against the feed's OWN stale_after_hours, counting only
+    time inside its operating window.
+
+    The first version of this function derived its threshold from the
+    publisher's claimed cadence times a multiplier this project
+    invented, and ignored the operating window entirely. On its first
+    real run - 23:34 ET on Monday 2026-10-12 - it reported both SEC
+    XBRL feeds as LATE because they were last built at 21:50 ET. The
+    SEC publishes those feeds "every ten minutes Monday through Friday,
+    6am - 10pm EST". 21:50 is the last ten-minute slot before close.
+    The feeds could not have been more compliant, and the check called
+    them dead.
+
+    Two further things that run established, both of which this
+    function must not mistake for faults:
+
+      - The newest ITEM in both feeds was Friday 2026-10-09, because
+        10-10 and 10-11 were the weekend and Monday 10-12 was Columbus
+        Day, a federal holiday on which EDGAR accepts no filings. A
+        feed that is rebuilt on time and correctly contains nothing is
+        healthy. Item age is therefore not checked here at all.
+      - The two SEC news feeds carry no lastBuildDate element, so they
+        are UNDATED: uncheckable, which is reported as its own verdict
+        rather than folded into ok.
     """
     now = now or datetime.now(timezone.utc)
     built = channel.get("built")
     if built is None:
         return "UNDATED", ("no lastBuildDate or updated element, so this "
                            "feed cannot be checked for staleness at all")
-    behind = now - built
-    if cadence_minutes > 0:
-        limit = timedelta(minutes=cadence_minutes * STALE_FACTOR)
-        claim = f"publisher states {cadence_minutes} min"
+    inside = open_seconds(built, now, feed.window)
+    limit = feed.stale_after_hours * 3600
+    wall = _ago(now - built)
+    if feed.window:
+        detail = (f"{_ago(timedelta(seconds=inside))} of that inside "
+                  f"{feed.window}")
     else:
-        limit = timedelta(days=UNSTATED_CADENCE_STALE_DAYS)
-        claim = f"no stated cadence, judged against {UNSTATED_CADENCE_STALE_DAYS}d"
-    human = _ago(behind)
-    if behind > limit:
-        return "LATE", (f"last built {human} ago ({claim}) - this feed is "
-                        f"not being updated, so an empty result from it "
-                        f"means nothing")
-    return "ok", f"last built {human} ago ({claim})"
+        detail = "no operating window declared, so all of it counts"
+    if inside > limit:
+        return "LATE", (f"last built {wall} ago, {detail}, over this "
+                        f"feed's {feed.stale_after_hours:g}h threshold - "
+                        f"an empty result from it means nothing")
+    return "ok", (f"last built {wall} ago, {detail}, within "
+                  f"{feed.stale_after_hours:g}h")
 
 
 def _ago(d: timedelta) -> str:
@@ -554,12 +662,13 @@ def _ago(d: timedelta) -> str:
 
 def cmd_list(feeds: "list[Feed]") -> None:
     print(f"\n{len(feeds)} feed(s) in {SEED.name}\n")
-    print(f"  {'key':<18}{'cap':<8}{'cadence':<10}{'verified':<12}host")
-    print("  " + "-" * 74)
+    print(f"  {'key':<18}{'cap':<7}{'stale>':>7}  {'verified':<12}"
+          f"{'window':<38}publisher says")
+    print("  " + "-" * 112)
     for f in feeds:
-        cad = f"{f.cadence_minutes}m" if f.cadence_minutes else "unstated"
         ver = f.verified_on if f.verified == "yes" else "NO"
-        print(f"  {f.key:<18}{f.cap:<8}{cad:<10}{ver:<12}{f.host}")
+        print(f"  {f.key:<18}{f.cap:<7}{f.stale_after_hours:>6.0f}h  "
+              f"{ver:<12}{(f.window or 'always'):<38}{f.cadence_claimed}")
     unver = [f.key for f in feeds if f.verified != "yes"]
     if unver:
         print(f"\n  {len(unver)} unverified, skipped by --poll: "
@@ -610,7 +719,7 @@ def cmd_verify(feeds: "list[Feed]", c: Client, only: "list[str]|None",
             f.verified, f.verified_on = "no", ""
             faults += 1
             continue
-        verdict, sentence = staleness(channel, f.cadence_minutes)
+        verdict, sentence = staleness(channel, f)
         print(f"    HTTP {status}  {channel['format']}  "
               f"{len(items)} item(s)  conditional-GET headers: "
               f"{'yes' if got else 'NONE OFFERED'}")
@@ -677,7 +786,7 @@ def cmd_poll(feeds: "list[Feed]", c: Client, include_unverified: bool,
         except (ET.ParseError, ValueError) as e:
             notes.append(f"{f.key}: 200 but not a feed - {e}")
             continue
-        verdict, sentence = staleness(channel, f.cadence_minutes)
+        verdict, sentence = staleness(channel, f)
         if verdict != "ok":
             notes.append(f"{f.key}: {verdict} - {sentence}")
         if channel.get("built"):
@@ -732,6 +841,43 @@ def cmd_poll(feeds: "list[Feed]", c: Client, include_unverified: bool,
               "reported as new next run")
 
 
+def cmd_raw(feeds: "list[Feed]", c: Client, key: str) -> int:
+    """Show what one feed actually served. For the case --verify names
+    but cannot explain: HTTP 200, bytes on the wire, and not a feed.
+
+    fed_register_sec hit exactly that on 2026-10-13 - 200, 10,595 bytes,
+    "not well-formed (invalid token): line 16, column 67" - and the URL
+    pattern came from sec.gov's own RSS page, so the question of whether
+    the SEC is advertising a pattern that no longer works is worth one
+    request to settle. A tool that reports a fault should be able to
+    show its evidence without anybody writing throwaway python.
+    """
+    f = next((x for x in feeds if x.key == key), None)
+    if f is None:
+        raise SystemExit(f"no feed named {key!r}. --list shows them.")
+    allowed, why = c.robots(f.url)
+    if not allowed:
+        print(f"  REFUSED: {why}")
+        return 1
+    c._spend()                    # a diagnostic request is still a request
+    c._wait(f.host)
+    self_ = c.s.get(f.url, timeout=30)
+    print(f"\n{f.key}  {f.url}")
+    print(f"  HTTP {self_.status_code}  "
+          f"Content-Type: {self_.headers.get('Content-Type')!r}")
+    print(f"  {len(self_.content)} bytes on the wire, "
+          f"{len(self_.text)} characters decoded")
+    try:
+        channel, items = parse_feed(self_.text)
+        print(f"  PARSES: {channel['format']}, {len(items)} item(s)")
+    except (ET.ParseError, ValueError) as e:
+        print(f"  DOES NOT PARSE: {e}")
+    print("\n  --- first 25 lines as served ---")
+    for n, line in enumerate(self_.text.splitlines()[:25], start=1):
+        print(f"  {n:>3} | {line[:150]}")
+    return 0
+
+
 def main(argv: "list[str]|None" = None) -> int:
     p = argparse.ArgumentParser(
         prog="python -m src.feeds.watch",
@@ -743,6 +889,9 @@ def main(argv: "list[str]|None" = None) -> int:
                    help="fetch each feed once and record what came back")
     g.add_argument("--poll", action="store_true",
                    help="report items new since the last poll")
+    g.add_argument("--raw", metavar="KEY",
+                   help="dump what one feed actually serves, for "
+                        "diagnosing a 200 that is not a feed")
     p.add_argument("--only", nargs="*", metavar="KEY",
                    help="restrict --verify to these registry keys")
     p.add_argument("--apply", action="store_true",
@@ -760,6 +909,8 @@ def main(argv: "list[str]|None" = None) -> int:
         cmd_list(feeds)
         return 0
     c = Client(max_requests=a.max_requests)
+    if a.raw:
+        return cmd_raw(feeds, c, a.raw)
     if a.verify:
         return 1 if cmd_verify(feeds, c, a.only, a.apply) else 0
     cmd_poll(feeds, c, a.include_unverified, not a.dry_run)

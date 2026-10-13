@@ -2,36 +2,51 @@
 #
 # One row per feed. Columns are TAB separated:
 #
-#   key              stable short name, used in state and reports
-#   url              the feed URL
-#   cap              what it can tell us: OBJ ORG MONEY EVENT TECH POLICY
-#   cadence_minutes  how often the PUBLISHER says it updates, 0 = unstated
-#   verified         yes|no — has this URL been fetched and parsed BY US
-#   verified_on      ISO date of that measurement, or blank
-#   basis            why this feed is in the list. >40 chars. A reviewer
-#                    must be able to act on it without asking anyone.
+#   key                stable short name, used in state and reports
+#   url                the feed URL
+#   cap                OBJ ORG MONEY EVENT TECH POLICY
+#   cadence_claimed    what the PUBLISHER says, verbatim enough to check,
+#                      or "unstated". Documentation only — nothing reads it
+#   stale_after_hours  OUR threshold. The only number the check uses
+#   window             when the publisher actually rebuilds, or blank for
+#                      always. "Mon-Fri 06:00-22:00 America/New_York".
+#                      Time OUTSIDE the window does not count as silence
+#   verified           yes|no — has this URL been fetched and parsed BY US
+#   verified_on        ISO date of that measurement, or blank
+#   basis              why this feed is in the list. >40 chars
 #
-# RULE, and the reason this file ships mostly unverified:
-# a feed URL recalled from memory is a guess (AD-112 — there is no SIC
-# 3761). Every row below that says verified=no has NOT been fetched by
-# this project. `python -m src.feeds.watch --verify` fetches each one
-# from YOUR network, records what actually came back, and rewrites the
-# verified/verified_on columns. Until then the rows are candidates, not
-# sources, and --poll skips them unless given --include-unverified.
+# WHY cadence_claimed AND stale_after_hours ARE TWO COLUMNS
+# The first version of this file had one, cadence_minutes, and the code
+# multiplied it by six. Both halves were wrong, and the first real run
+# proved it in one line: at 23:34 ET on Monday 2026-10-12 it called both
+# SEC XBRL feeds LATE because they were last built at 21:50 ET. The SEC
+# publishes them "every ten minutes Monday through Friday, 6am - 10pm
+# EST" — 21:50 is the LAST TEN-MINUTE SLOT BEFORE CLOSE. The feeds were
+# flawless; the check had kept the number from that sentence and thrown
+# away the conditions, then scored the publisher against a multiplier
+# this project invented. A threshold now has a visible author. See
+# AD-115.
 #
-# The four SEC rows were measured through the session's fetcher on
-# 2026-10-13 and are marked verified=no ANYWAY, because that fetcher is
-# not the network the pipeline runs on and two of the three XBRL feeds
-# came back months stale. Re-measure locally. See the staleness note in
-# docs/API_USAGE_POLICY.md.
+# HOLIDAYS ARE NOT MODELLED. The window knows about weekends and nights,
+# not about Columbus Day. The thresholds below are therefore set so that
+# ONE closed weekday (16 in-window hours) cannot trigger LATE on its
+# own, and two consecutive ones can. That is a deliberate trade: one
+# missed alarm over a long federal weekend, rather than a false alarm
+# every holiday, which is the kind of noise that gets a check ignored.
 #
-key	url	cap	cadence_minutes	verified	verified_on	basis
-sec_press	https://www.sec.gov/news/pressreleases.rss	POLICY	0	yes	2026-10-13	SEC press releases. Enforcement and rule changes that move a filer's disclosure obligations, which is upstream of every number sec_edgar.py reads.
-sec_litigation	https://www.sec.gov/enforcement-litigation/litigation-releases/rss	POLICY	0	yes	2026-10-13	SEC litigation releases. A filer under enforcement is a filer whose reported figures may be restated; a restatement is a competing claim, not a correction.
-sec_xbrl_usgaap	https://www.sec.gov/Archives/edgar/usgaap.rss.xml	MONEY	10	yes	2026-10-13	Up to 200 latest filings with US-GAAP or IFRS tagged financial statements, carrying edgar:cikNumber and edgar:assignedSic. The arrival signal for sec_edgar.py — tells us a NEW 10-K exists without polling 16 filers.
-sec_xbrl_all	https://www.sec.gov/Archives/edgar/xbrlrss.all.xml	MONEY	10	yes	2026-10-13	All XBRL filings, up to 200. Broader than the US-GAAP feed and the cheapest way to notice a space filer we have not seeded, because every item carries its SIC.
-nasa_news	https://www.nasa.gov/news-release/feed/	EVENT	0	yes	2026-10-13	NASA news releases. Mission milestones, award announcements and programme changes — the EVENT cap, and one of the news sources the cost model is meant to build inferences from.
-nasa_technology	https://www.nasa.gov/technology/feed/	TECH	0	yes	2026-10-13	NASA technology news. Directly adjacent to the TechPort TRL data already ingested; a TRL change is usually announced here before TechPort's record moves.
-nasa_jpl	https://www.nasa.gov/centers-and-facilities/jpl/feed/	EVENT	0	yes	2026-10-13	JPL centre news. Highest spacecraft-per-release rate of any NASA centre feed, which is what makes it worth a row of its own rather than relying on the firehose.
-nasa_all	https://www.nasa.gov/feed/	EVENT	0	yes	2026-10-13	NASA recently-published content, all of it. Listed as the fallback if the topical feeds prove too narrow; expected to be noisy enough that it stays off by default.
-fed_register_sec	https://www.federalregister.gov/articles/search.rss?conditions%5Bagency_ids%5D%5B%5D=466	POLICY	0	no		Federal Register, SEC agency id 466 — the URL pattern is the SEC's own, taken from sec.gov/about/rss-feeds. Proves the conditions[agency_ids][] parameter works, so FCC and NOAA rows can be added the same way once their ids are READ rather than guessed.
+# VERIFIED STATUS, read 2026-10-13 03:34 UTC from the conda env:
+# eight of nine fetched, parsed, and offered conditional-GET headers.
+# fed_register_sec returned HTTP 200 and 10,595 bytes that are not XML —
+# use `--raw fed_register_sec` to see what it actually serves before
+# trusting the URL pattern, which came from sec.gov's own RSS page.
+#
+key	url	cap	cadence_claimed	stale_after_hours	window	verified	verified_on	basis
+sec_press	https://www.sec.gov/news/pressreleases.rss	POLICY	unstated	336		yes	2026-10-13	SEC press releases. Enforcement and rule changes that move a filer's disclosure obligations, which is upstream of every number sec_edgar.py reads. Carries no lastBuildDate, so it reports UNDATED and the threshold is nominal.
+sec_litigation	https://www.sec.gov/enforcement-litigation/litigation-releases/rss	POLICY	unstated	336		yes	2026-10-13	SEC litigation releases. A filer under enforcement is a filer whose reported figures may be restated, and a restatement is a competing claim rather than a correction. Also carries no lastBuildDate.
+sec_xbrl_usgaap	https://www.sec.gov/Archives/edgar/usgaap.rss.xml	MONEY	every 10 min Mon-Fri 6am-10pm EST	20	Mon-Fri 06:00-22:00 America/New_York	yes	2026-10-13	Up to 200 latest filings with US-GAAP or IFRS tagged statements, each carrying edgar:cikNumber and edgar:assignedSic. The arrival signal for sec_edgar.py: tells us a new 10-K exists without polling 16 filers.
+sec_xbrl_all	https://www.sec.gov/Archives/edgar/xbrlrss.all.xml	MONEY	every 10 min Mon-Fri 6am-10pm EST	20	Mon-Fri 06:00-22:00 America/New_York	yes	2026-10-13	All XBRL filings, up to 200. Broader than the US-GAAP feed and the cheapest way to notice a space filer we never seeded, because every item carries its SIC.
+nasa_news	https://www.nasa.gov/news-release/feed/	EVENT	unstated	168		yes	2026-10-13	NASA news releases. Mission milestones, award announcements and programme changes. Measured rebuilding same-day on 10-13, so a week of silence is genuinely odd for this one.
+nasa_technology	https://www.nasa.gov/technology/feed/	TECH	unstated	720		yes	2026-10-13	NASA technology news, adjacent to the TechPort TRL data already ingested. Measured 10 days between builds on 10-13, which is normal for a topical feed and is why the threshold is 30 days rather than a week.
+nasa_jpl	https://www.nasa.gov/centers-and-facilities/jpl/feed/	EVENT	unstated	720		yes	2026-10-13	JPL centre news, the highest spacecraft-per-release rate of any NASA centre feed. Measured 4 days between builds, so it gets the topical threshold rather than the news one.
+nasa_all	https://www.nasa.gov/feed/	EVENT	unstated	168		yes	2026-10-13	NASA recently-published content, all of it. Kept as the fallback if the topical feeds prove too narrow; expected to be noisy, and its build time tracked nasa_news exactly on 10-13.
+fed_register_sec	https://www.federalregister.gov/articles/search.rss?conditions%5Bagency_ids%5D%5B%5D=466	POLICY	unstated	336		no		Federal Register, SEC agency id 466 — the URL pattern is the SEC's own, from sec.gov/about/rss-feeds. Returned 200 and 10,595 bytes of non-XML on 10-13, so the pattern is unconfirmed; FCC and NOAA rows wait on reading their agency ids rather than guessing.

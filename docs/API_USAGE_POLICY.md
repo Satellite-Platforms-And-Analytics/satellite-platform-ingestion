@@ -506,6 +506,7 @@ and is indistinguishable, from the operator's side, from a scraper.
 | Requests per feed per run | **1** |
 | Minimum interval per host | 2 s, raised by any published `Crawl-delay` |
 | Hard cap per run | 40 requests, robots.txt fetches included |
+| Measured cost of one full `--verify` | **12 requests** across 3 hosts |
 | Unverified rows | **not polled** unless `--include-unverified` |
 | Writes to the database | **none** |
 
@@ -541,26 +542,73 @@ taking anyone's word for it.
 
 A watcher that reports only new items cannot tell *"nothing happened"*
 from *"this feed died six months ago"* — both render as an empty list.
-So `staleness()` compares the channel's own `lastBuildDate` against the
-cadence the publisher declares, and a feed more than **6×** its declared
-cadence behind is reported as **LATE**. A feed with no date at all is
-reported as **UNDATED**, which is deliberately not the same as ok.
+So `staleness()` reports **LATE** when a feed has been silent longer
+than its own `stale_after_hours`, and **UNDATED** when it carries no
+build date at all, which is deliberately not the same as ok.
 
-It paid for itself on the day it was written. All three SEC structured-
-data feeds describe themselves as *"updated every ten minutes"*:
+**Corrected 2026-10-13, same day.** The first version of this section
+reported all three SEC XBRL feeds as months stale, with a table of
+`lastBuildDate` values in April and February 2026. **That was wrong.**
+Those readings came from the session's fetcher, which caches, and the
+section said so and called for re-measurement — which is the only
+reason this is a correction and not a false entry in the register. Run
+from the conda env at 03:34 UTC on 10-13, both feeds reported
+`lastBuildDate` of **2026-10-12 21:50:03 ET**, minutes old at the time
+and exactly where they should be. The feeds are healthy.
 
-| Feed | `lastBuildDate` read 2026-10-13 |
+### The threshold is ours, and the first version stole it from a sentence
+
+The same run produced a **false LATE** on both XBRL feeds, and the
+cause was in this module, not at the SEC.
+
+The first version derived its threshold from the publisher's claimed
+cadence × 6. The SEC's sentence is *"updated every ten minutes **Monday
+through Friday, 6am – 10pm EST**"*. The code kept the ten minutes and
+dropped the conditions. At **23:34 ET on Monday** it found a feed last
+built at **21:50 ET** — the last ten-minute slot before the 10pm
+close — and called it dead. Nothing about the feed was wrong; it had
+shut down for the night on schedule.
+
+Two parts to the fix:
+
+1. **The registry now carries `cadence_claimed` and
+   `stale_after_hours` as separate columns.** The first is what the
+   publisher says, documentation only, read by nothing. The second is
+   this project's threshold, the only number the check uses. They can
+   no longer be the same number by accident, and a threshold has a
+   visible author instead of a multiplier nobody published.
+2. **A `window` column.** `Mon-Fri 06:00-22:00 America/New_York`. Time
+   outside the window does not count as silence, so Friday 21:55 to
+   Monday 07:00 is 57 wall-clock hours and **one** in-window hour.
+
+**Holidays are not modelled.** The window knows about nights and
+weekends, not about Columbus Day. The SEC thresholds are therefore set
+to 20h so that one closed weekday (16 in-window hours) cannot raise an
+alarm alone and two consecutive ones can — a deliberate trade of one
+missed alarm over a long federal weekend against a false alarm every
+holiday, which is the kind of noise that gets a check ignored.
+
+**Item age is not checked at all.** Both XBRL feeds' newest item on
+10-13 was Friday 10-09, because 10-10 and 10-11 were the weekend and
+Monday 10-12 was Columbus Day, a federal holiday on which EDGAR accepts
+no filings. A feed rebuilt on time and correctly containing nothing is
+healthy. Only `lastBuildDate` is read.
+
+### What the first real run did find
+
+| Feed | Result |
 |---|---|
-| `usgaap.rss.xml` | Fri, 24 Apr 2026 18:50:03 EDT |
-| `xbrl-inline.rss.xml` | Fri, 24 Apr 2026 18:50:02 EDT |
-| `xbrlrss.all.xml` | Fri, 27 Feb 2026 07:50:02 EST |
+| 8 of 9 | HTTP 200, parsed, **conditional-GET headers offered by every one** |
+| `sec_press`, `sec_litigation` | **no `lastBuildDate` element at all** → permanently UNDATED, uncheckable |
+| `sec_xbrl_usgaap`, `sec_xbrl_all` | healthy; built 21:50 ET, 200 items each, newest item Friday (holiday weekend) |
+| `nasa_technology` | 10 days between builds — normal for a topical feed, and why its threshold is 30 days not a week |
+| `fed_register_sec` | **HTTP 200, 10,595 bytes, not XML.** *"not well-formed (invalid token): line 16, column 67"* |
 
-Two agreeing to the second, one seven weeks earlier. **Measured through
-the session's fetcher, which is not the network this pipeline runs on**,
-so it is recorded as something to re-measure rather than as a fact about
-the SEC — the three different dates argue against a single shared cache,
-but that is an inference, not a reading. Either way those rows ship
-`verified=no` and the check is now permanent.
+That last row is what `--verify` exists for: **a 200 is not a feed.** The
+URL pattern came from sec.gov's own RSS page, and the row stays
+`verified=no` until `--raw fed_register_sec` shows what the Federal
+Register actually serves. FCC and NOAA rows wait on reading their agency
+ids rather than guessing them.
 
 ### Nothing here writes to the database, on purpose
 
@@ -576,9 +624,9 @@ contains no reference to `src.db`, `sqlalchemy`, `cost_claims` or
 
 ### What is required before the first poll
 
-1. `python -m src.feeds.watch --verify --apply` **from the network the
-   pipeline runs on.** Every row ships unverified; `--poll` skips them.
-   Neither the session's fetcher nor the device VM can reach sec.gov or
-   nasa.gov, so this is the user's to run.
-2. Read the first `--poll` output before trusting the next one: the
-   first run records a baseline and reports **no** new items by design.
+1. ~~`--verify --apply` from the pipeline's network.~~ **Done
+   2026-10-13**: 8 of 9 verified. Only the cloud fetcher and the device
+   VM cannot reach sec.gov and nasa.gov; the conda env can.
+2. `--raw fed_register_sec` to settle what that URL serves.
+3. The first `--poll` records a baseline and reports **no** new items by
+   design. Run on 10-13; the next poll is the first real one.
