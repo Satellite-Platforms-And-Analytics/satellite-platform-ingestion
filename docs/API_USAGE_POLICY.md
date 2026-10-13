@@ -602,13 +602,36 @@ healthy. Only `lastBuildDate` is read.
 | `sec_press`, `sec_litigation` | **no `lastBuildDate` element at all** → permanently UNDATED, uncheckable |
 | `sec_xbrl_usgaap`, `sec_xbrl_all` | healthy; built 21:50 ET, 200 items each, newest item Friday (holiday weekend) |
 | `nasa_technology` | 10 days between builds — normal for a topical feed, and why its threshold is 30 days not a week |
-| `fed_register_sec` | **HTTP 200, 10,595 bytes, not XML.** *"not well-formed (invalid token): line 16, column 67"* |
+| `fed_register_sec` | **HTTP 200, 10,595 bytes of `text/html`** — an access gate, see below |
 
-That last row is what `--verify` exists for: **a 200 is not a feed.** The
-URL pattern came from sec.gov's own RSS page, and the row stays
-`verified=no` until `--raw fed_register_sec` shows what the Federal
-Register actually serves. FCC and NOAA rows wait on reading their agency
-ids rather than guessing them.
+That last row is what `--verify` exists for: **a 200 is not a feed.**
+And `--raw` then said exactly what it was, in one line:
+
+```
+HTTP 200  Content-Type: 'text/html; charset=utf-8'
+<title>Federal Register :: Request Access</title>
+```
+
+A CSRF token, a CSP nonce, and a page whose own title states what the
+site wants: **automated clients should request access rather than
+fetch.** Not a broken URL and not a changed pattern — a closed door,
+served with a 200 so that a careless client never notices.
+
+**So the row is refused and commented out of the registry**, reason
+attached, where neither `--verify` nor `--poll` can knock again. The
+standing instruction is to violate no site's policy, and the response
+to a gate is to stop requesting, not to look more like a browser.
+`check_techport_403.py` declined to ship browser impersonation in
+September for the same reason, and that precedent decides this.
+
+Their sanctioned route for programs is the **Federal Register JSON API**
+at `api.federalregister.gov`. It is not RSS and does not belong in
+`feeds.tsv`; it belongs in this document once somebody reads its terms
+from the publisher's own developer page. Unread, so unwritten. The same
+applies to the FCC and NOAA agency ids, and to CelesTrak, ESA and arXiv
+— `--check <url>` tests a candidate and prints what a registry row for
+it would need, without writing anything, so adding a source honestly
+costs one command.
 
 ### Nothing here writes to the database, on purpose
 
@@ -627,6 +650,16 @@ contains no reference to `src.db`, `sqlalchemy`, `cost_claims` or
 1. ~~`--verify --apply` from the pipeline's network.~~ **Done
    2026-10-13**: 8 of 9 verified. Only the cloud fetcher and the device
    VM cannot reach sec.gov and nasa.gov; the conda env can.
-2. `--raw fed_register_sec` to settle what that URL serves.
+2. ~~`--raw fed_register_sec`~~ **Done**: an access gate. Refused.
 3. The first `--poll` records a baseline and reports **no** new items by
    design. Run on 10-13; the next poll is the first real one.
+
+### Modes
+
+| Mode | Requests | Writes |
+|---|---|---|
+| `--list` | none | none |
+| `--check <url>` | 1 (+robots) | none — for growing the registry |
+| `--raw <key>` | 1 (+robots) | none — for diagnosing a fault |
+| `--verify [--apply]` | 1 per feed | `verified`/`verified_on` only, with `--apply` |
+| `--poll [--dry-run]` | 1 per feed, usually 304 | the seen-id state only |

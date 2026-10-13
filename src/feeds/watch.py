@@ -841,6 +841,63 @@ def cmd_poll(feeds: "list[Feed]", c: Client, include_unverified: bool,
               "reported as new next run")
 
 
+def cmd_check(c: Client, url: str) -> int:
+    """Test ONE url that is not in the registry, and print the row it
+    would deserve. Writes nothing.
+
+    This exists because the registry can only grow honestly if adding a
+    candidate is cheap. CelesTrak, ESA, arXiv and the FCC are all
+    missing from feeds.tsv for the same reason: nobody had fetched them,
+    and writing an unfetched URL into a registry is AD-112. `--check`
+    makes the gap between "somebody mentioned a feed" and "we measured
+    it" one command long, and it refuses the same things --verify
+    refuses: a disallowed path, a 200 that is not a feed.
+    """
+    if not url.startswith("https://"):
+        raise SystemExit("https only. A feed read over http can be "
+                         "rewritten in transit.")
+    print(f"\nCHECK (nothing is written)\n\n  {url}")
+    allowed, why = c.robots(url)
+    if not allowed:
+        print(f"    REFUSED: {why}")
+        return 1
+    try:
+        r = c.s.get(url, timeout=30)
+        c._spend()
+    except requests.RequestException as e:
+        print(f"    FAILED: {e.__class__.__name__}: {e}")
+        return 1
+    ctype = r.headers.get("Content-Type", "?")
+    cond = [h for h in ("ETag", "Last-Modified") if r.headers.get(h)]
+    print(f"    HTTP {r.status_code}  {ctype!r}  {len(r.content)} bytes")
+    print(f"    conditional GET: {', '.join(cond) if cond else 'NONE OFFERED'}")
+    try:
+        channel, items = parse_feed(r.text)
+    except (ET.ParseError, ValueError) as e:
+        print(f"    NOT A FEED: {e}")
+        print(f"    Run --raw after adding it, or look at what it served "
+              f"above. A 200 is not a feed.")
+        return 1
+    built = channel.get("built")
+    print(f"    {channel['format']}, {len(items)} item(s), "
+          f"title: {channel['title'][:60]}")
+    print(f"    lastBuildDate: "
+          f"{built.isoformat() if built else 'ABSENT - uncheckable for staleness'}")
+    dated = [i["published"] for i in items if i["published"]]
+    if len(dated) > 1:
+        gaps = sorted((a - b).total_seconds() / 3600
+                      for a, b in zip(dated, dated[1:]) if a > b)
+        if gaps:
+            print(f"    item spacing: median {gaps[len(gaps) // 2]:.1f}h "
+                  f"across {len(dated)} dated items - a starting point for "
+                  f"stale_after_hours, not an answer")
+    print("\n  A registry row for it would need: cap, the publisher's "
+          "stated\n  cadence (read it, do not infer it from the spacing "
+          "above), a\n  stale_after_hours YOU choose, an operating window "
+          "if one is\n  published, and a basis over 40 characters.")
+    return 0
+
+
 def cmd_raw(feeds: "list[Feed]", c: Client, key: str) -> int:
     """Show what one feed actually served. For the case --verify names
     but cannot explain: HTTP 200, bytes on the wire, and not a feed.
@@ -889,6 +946,10 @@ def main(argv: "list[str]|None" = None) -> int:
                    help="fetch each feed once and record what came back")
     g.add_argument("--poll", action="store_true",
                    help="report items new since the last poll")
+    g.add_argument("--check", metavar="URL",
+                   help="test a URL that is not in the registry and "
+                        "print what a row for it would need. Writes "
+                        "nothing")
     g.add_argument("--raw", metavar="KEY",
                    help="dump what one feed actually serves, for "
                         "diagnosing a 200 that is not a feed")
@@ -909,6 +970,8 @@ def main(argv: "list[str]|None" = None) -> int:
         cmd_list(feeds)
         return 0
     c = Client(max_requests=a.max_requests)
+    if a.check:
+        return cmd_check(c, a.check)
     if a.raw:
         return cmd_raw(feeds, c, a.raw)
     if a.verify:

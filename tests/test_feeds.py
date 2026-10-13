@@ -374,6 +374,7 @@ def test_robots_refusal_is_not_overridable_from_the_command_line():
 class _FakeResponse:
     def __init__(self, status: int, text: str = ""):
         self.status_code, self.text = status, text
+        self.content = text.encode("utf-8")   # a real response has both
         self.headers: dict = {}
 
     def raise_for_status(self):
@@ -441,3 +442,25 @@ def test_conditional_get_sends_nothing_on_a_first_look():
     f = watch.read_registry()[0]
     status, body, got = c.get_feed(f, {})
     assert status == 200 and body and got == {}
+
+
+def test_check_refuses_http_and_refuses_a_non_feed(capsys):
+    """--check is how the registry grows. It must refuse exactly what
+    --verify refuses, or it becomes the loose door into the file."""
+    c = _client_with(_FakeResponse(200, "<html>Request Access</html>"))
+    with pytest.raises(SystemExit):
+        watch.cmd_check(c, "http://e.test/f.xml")
+    c = _client_with(_FakeResponse(200, "<html>Request Access</html>"))
+    c._robots["e.test"] = None
+    assert watch.cmd_check(c, "https://e.test/f.xml") == 1
+    assert "NOT A FEED" in capsys.readouterr().out
+
+
+def test_check_accepts_a_real_feed_without_writing_anything(capsys):
+    c = _client_with(_FakeResponse(200, SEC_RSS))
+    c._robots["e.test"] = None
+    before = watch.SEED.read_text(encoding="utf-8")
+    assert watch.cmd_check(c, "https://e.test/f.xml") == 0
+    out = capsys.readouterr().out
+    assert "2 item(s)" in out and "lastBuildDate" in out
+    assert watch.SEED.read_text(encoding="utf-8") == before
