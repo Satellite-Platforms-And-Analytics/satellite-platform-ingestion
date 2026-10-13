@@ -768,3 +768,55 @@ dragged a database engine factory into the module whose contract is
 that it does not touch the database — and a second copy of the dict is
 AD-112 with the serial numbers filed off. A test asserts exactly one
 definition exists.
+
+### The arXiv row is unproven, and that is where it stays — 2026-10-14
+
+`--check` on the single category settled the first question and opened
+a better one.
+
+| Measurement | Value |
+|---|---|
+| `rss.arxiv.org/rss/astro-ph.IM` | HTTP 200, `application/rss+xml`, **916 bytes** |
+| Title | `astro-ph.IM updates on arXiv.org` — correct |
+| Items | **0** |
+| `lastBuildDate` | `2026-10-13T04:00:05Z`, read on 10-14 |
+| Conditional GET | ETag offered |
+| arXiv's own status page | `rss.arxiv.org/feed/status` → **"Status: GOOD"** |
+
+So it is **not** the `+` multi-category syntax — a single category
+behaves identically. The publisher believes its feed service is
+healthy. The feed is reachable, well-formed, correctly titled, and
+yields nothing.
+
+**The cause is undetermined and is not being guessed.** One check
+discriminates between what is left: a high-volume archive. Items there
+means the emptiness is category-specific; zero there means the service
+or our access to it. Until that is run the row keeps
+`verified=no` — with all of the above written into its basis, so the
+next person starts from the measurements rather than repeating them.
+
+And the attempt to leave it `verified=yes` exposed a second defect in
+the same hour. `emptiness()` printed **EMPTY** and `cmd_verify`
+promoted the row anyway: the fault reported, and the surrounding code
+behaving as though it had not been. That is AD-109's shape — a check
+whose finding nothing acts on — and it would have let
+`--verify --apply` flip the row back on every run. **`verified` has to
+mean a working source, not a reachable URL**, so a feed yielding no
+items is now never promoted, and a test pins the branch ordering.
+
+### The digest's third case
+
+The second poll was the first healthy one: **6 of 9 feeds answered 304
+with no body**, which is the conditional-GET design doing exactly what
+it was built for, and 15 new items instead of 301.
+
+It also showed the SIC split was a case short. Six new `usgaap` items,
+all carrying SICs, none in scope — pharma, finance, oil and gas — and
+the digest printed all six, which implies they were judged relevant.
+Three cases, not two:
+
+| Items | Digest |
+|---|---|
+| No SIC at all (every NASA item) | print them; never filter |
+| Coded, some in scope | print those, then count the rest with their top codes |
+| Coded, none in scope | **"0 of 6 in scope"** and the top codes — not six arbitrary filings |

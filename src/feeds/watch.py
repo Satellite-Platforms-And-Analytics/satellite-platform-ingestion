@@ -739,8 +739,15 @@ def _ago(d: timedelta) -> str:
 
 # ── modes ─────────────────────────────────────────────────────────────
 
-def split_by_sic(items: "list[dict]") -> "tuple[list, list]":
-    """(in_scope, other) for items that carry a SIC; ([], items) if none do.
+def split_by_sic(items: "list[dict]") -> "tuple[list, list, bool]":
+    """(in_scope, other, any_coded) for items carrying a SIC.
+
+    `any_coded` is the third value because the two no-in-scope cases are
+    different and the caller must not confuse them: NASA items carry no
+    SIC at all and must never be filtered, while SEC items that are all
+    coded out of scope are a real answer - "0 of 6 in scope" - and
+    printing twelve of them instead would imply they had been judged
+    relevant.
 
     Added after the 2026-10-14 poll printed 301 items, of which roughly
     six were about space. `sec_xbrl_all`'s first twelve were eight
@@ -755,9 +762,9 @@ def split_by_sic(items: "list[dict]") -> "tuple[list, list]":
     """
     coded = [i for i in items if i.get("sic")]
     if not coded:
-        return [], items
+        return [], items, False
     in_scope = [i for i in items if i.get("sic") in SPACE_SIC]
-    return in_scope, [i for i in items if i not in in_scope]
+    return in_scope, [i for i in items if i not in in_scope], True
 
 
 def _top_sics(items: "list[dict]", n: int = 4) -> str:
@@ -843,6 +850,20 @@ def cmd_verify(feeds: "list[Feed]", c: Client, only: "list[str]|None",
                   f"{items[0]['title'][:52]}")
         if verdict == "LATE":
             faults += 1
+        if not items:
+            # Added hours after emptiness() itself, because the first
+            # version reported EMPTY and then promoted the row anyway:
+            # the fault was printed and the surrounding code behaved as
+            # though it had not been. That is AD-109's shape - a check
+            # whose finding nothing acts on - and it would have let
+            # --verify --apply flip this row back to yes on every run.
+            # "verified" has to mean a WORKING source, not a reachable
+            # URL.
+            print("    NOT PROMOTED: a feed that yields no items is a "
+                  "reachable URL, not a source")
+            f.verified, f.verified_on = "no", ""
+            print()
+            continue
         f.verified = "yes"
         f.verified_on = datetime.now(timezone.utc).date().isoformat()
         print()
@@ -936,8 +957,14 @@ def cmd_poll(feeds: "list[Feed]", c: Client, include_unverified: bool,
             print(f"\n  == {cap} ==")
             for f, fresh in by_cap[cap]:
                 print(f"\n  {f.key}  ({len(fresh)} new)")
-                in_scope, other = split_by_sic(fresh)
-                for i in (in_scope if in_scope else fresh)[:12]:
+                in_scope, other, coded = split_by_sic(fresh)
+                # When the items ARE coded and none is in scope, saying
+                # so beats printing twelve arbitrary filings: on 10-14
+                # the six new usgaap items were pharma, finance and oil,
+                # and listing them implied they had been judged
+                # relevant.
+                show = in_scope if (in_scope or not coded) else []
+                for i in show[:12]:
                     when = (i["published"].date().isoformat()
                             if i["published"] else "undated")
                     tag = ""
@@ -950,15 +977,17 @@ def cmd_poll(feeds: "list[Feed]", c: Client, include_unverified: bool,
                         tag = (f"  [{i['form']} SIC "
                                f"{i['sic'] or '?'}{label}]")
                     print(f"    {when}  {i['title'][:62]}{tag}")
-                if in_scope:
-                    shown = min(len(in_scope), 12)
-                    if len(in_scope) > shown:
-                        print(f"    ... and {len(in_scope) - shown} more "
-                              f"in scope")
-                    print(f"    + {len(other)} filing(s) outside the "
-                          f"in-scope SIC list" + _top_sics(other))
-                elif len(fresh) > 12:
-                    print(f"    ... and {len(fresh) - 12} more")
+                if coded:
+                    if len(in_scope) > 12:
+                        print(f"    ... and {len(in_scope) - 12} more in "
+                              f"scope")
+                    label = ("none in the in-scope SIC list"
+                             if not in_scope else
+                             f"+ {len(other)} outside the in-scope SIC list")
+                    print(f"    {len(in_scope)} of {len(fresh)} in scope; "
+                          f"{label}" + _top_sics(other))
+                elif len(show) > 12:
+                    print(f"    ... and {len(show) - 12} more")
     else:
         print("  No new items.")
         if notes:

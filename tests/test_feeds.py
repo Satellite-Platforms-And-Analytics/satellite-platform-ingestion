@@ -539,9 +539,9 @@ def test_the_sic_split_finds_the_one_filing_that_mattered():
     items = [{"sic": "6211", "title": "MORGAN STANLEY"} for _ in range(8)]
     items += [{"sic": "2834", "title": "Apimeds Pharmaceuticals"},
               {"sic": "3663", "title": "Ondas Inc."}]
-    in_scope, other = watch.split_by_sic(items)
+    in_scope, other, coded = watch.split_by_sic(items)
     assert [i["title"] for i in in_scope] == ["Ondas Inc."]
-    assert len(other) == 9
+    assert len(other) == 9 and coded is True
     assert "6211x8" in watch._top_sics(other)
 
 
@@ -549,8 +549,11 @@ def test_items_without_a_sic_are_never_filtered_away():
     """NASA items carry no SIC. A filter that silently dropped them
     would turn an EVENT digest into an empty one."""
     items = [{"sic": "", "title": "NASA launches something"}]
-    in_scope, other = watch.split_by_sic(items)
+    in_scope, other, coded = watch.split_by_sic(items)
     assert in_scope == [] and other == items
+    assert coded is False, (
+        "an uncoded feed must be distinguishable from a coded feed with "
+        "nothing in scope, or the digest prints one as the other")
 
 
 def test_the_sic_list_has_exactly_one_definition():
@@ -565,3 +568,29 @@ def test_the_sic_list_has_exactly_one_definition():
     from src.sic import SPACE_SIC as canonical
     from src.funding.sec_edgar import SPACE_SIC as reexported
     assert canonical is reexported
+
+
+def test_coded_but_nothing_in_scope_is_a_third_case():
+    """Measured 2026-10-14: six new usgaap items, all coded, none in
+    scope - pharma, finance, oil and gas. "0 of 6 in scope" is the
+    honest line; printing the six implies they were judged relevant."""
+    items = [{"sic": s, "title": t} for s, t in
+             (("2834", "Alaunos Therapeutics"), ("6199", "SkyAI"),
+              ("1311", "EON Resources"))]
+    in_scope, other, coded = watch.split_by_sic(items)
+    assert in_scope == [] and coded is True and len(other) == 3
+
+
+def test_verify_does_not_promote_a_feed_that_yields_no_items(tmp_path):
+    """The first version of emptiness() printed EMPTY and then promoted
+    the row anyway - the fault reported, and the surrounding code acting
+    as though it had not been (AD-109). --verify --apply would have
+    flipped the arXiv row back to verified=yes on every run."""
+    import inspect
+    src = inspect.getsource(watch.cmd_verify)
+    assert "NOT PROMOTED" in src
+    i = src.index("if not items:")
+    j = src.index('f.verified = "yes"', i)
+    assert 'f.verified, f.verified_on = "no", ""' in src[i:j], (
+        "the empty-feed branch must clear verified before the promotion "
+        "line is reached")
