@@ -135,3 +135,80 @@ def test_cache_ttl_is_set_and_sane() -> None:
         "a TTL under a day would spend requests to observe a field that "
         "moves on the order of months"
     )
+
+
+# ── the SEC seed file (added 2026-10-12) ─────────────────────────────
+
+def test_every_sec_seed_row_states_a_basis() -> None:
+    """Same rule as org_aliases.tsv, and it earned its keep immediately:
+    the first version of sec_ciks.tsv had eight rows with a one-line
+    basis, and read_seed() refused to load the file until they said
+    something a reviewer could act on."""
+    from src.funding.sec_edgar import SEED
+    rows = [l for l in SEED.read_text(encoding="utf-8").splitlines()
+            if l.strip() and not l.startswith("#")
+            and not l.lower().startswith("ticker\t")]
+    assert rows, "the SEC seed file is empty"
+    for line in rows:
+        parts = line.split("\t")
+        assert len(parts) >= 4, f"no basis column: {line[:60]}"
+        assert parts[2] in ("pending", "match", "claim", "refuse"), parts[2]
+        assert len(parts[3].strip()) > 40, (
+            f"basis too thin to review: {parts[0]} -> {parts[3][:40]!r}")
+
+
+def test_sec_edgar_refuses_to_request_without_a_contact_address(monkeypatch):
+    """The SEC's webmaster FAQ says "Please declare your user agent" and
+    shows a sample carrying an admin contact address. It never calls the
+    address REQUIRED -- an earlier version of this docstring said it did,
+    which is the same error as citing a rate limit nobody published, run
+    in reverse. So this refusal is THIS PROJECT'S choice: CONTACT_EMAIL
+    is optional in the code base and ships blank in .env.example, and
+    the Data Source Register's claim that useragent.py "already
+    satisfies this" holds only once somebody sets it. Refusing beats
+    sending a UA the SEC cannot reach and risking the IP block the
+    standing instruction says to avoid."""
+    import pytest
+    from src.funding.sec_edgar import Client
+    monkeypatch.setenv("CONTACT_EMAIL", "")
+    with pytest.raises(SystemExit) as e:
+        Client()
+    assert "CONTACT_EMAIL" in str(e.value)
+
+
+def test_sec_edgar_holds_itself_below_the_published_limit() -> None:
+    """EDGAR publishes 10 req/s. A ceiling is not a target."""
+    from src.funding.sec_edgar import MIN_INTERVAL_S
+    assert MIN_INTERVAL_S >= 0.1, "that would be at or over the 10/s limit"
+    assert MIN_INTERVAL_S >= 0.2, "the stated policy is half the ceiling"
+
+
+def test_one_xbrl_tag_per_metric() -> None:
+    """Falling back across revenue tags would make source='sec_edgar' plus
+    metric='revenue' mean different things per company, and cost_claims
+    has no column recording which tag a row came from. The alternates
+    are listed to be COUNTED, never read."""
+    from src.funding.sec_edgar import ALSO_SEEN, TAG_FOR_METRIC
+    for metric, tag in TAG_FOR_METRIC.items():
+        assert tag not in ALSO_SEEN.get(metric, ()), (
+            f"{metric}: the chosen tag is also in the not-read list")
+    assert "market_cap" not in TAG_FOR_METRIC, (
+        "EDGAR has shares outstanding and no price; market cap would be "
+        "derived, not published")
+
+
+def test_space_sic_codes_exist_in_the_secs_own_list() -> None:
+    """SPACE_SIC shipped with "3761" and "3669", neither of which is in
+    the SEC's Division of Corporation Finance SIC list. The space code is
+    3760. Nothing filters on it today, so the bug was invisible; the
+    moment something did, the query would return zero rows and read as an
+    empty universe. These are the codes the SEC's list actually carries."""
+    from src.funding.sec_edgar import SPACE_SIC
+    assert "3760" in SPACE_SIC, "guided missiles & space vehicles is 3760"
+    for absent in ("3761", "3669"):
+        assert absent not in SPACE_SIC, (
+            f"{absent} is not a code in the SEC's list")
+    assert all(c.isdigit() and len(c) == 4 for c in SPACE_SIC), SPACE_SIC
+    assert all(isinstance(v, str) and v for v in SPACE_SIC.values()), (
+        "every code carries the SEC's own office description, so a "
+        "reviewer can check it against the list without a lookup")

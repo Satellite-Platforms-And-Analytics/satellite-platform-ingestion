@@ -353,3 +353,129 @@ sampling, not for loading history.
 NAICS 336414 / 336415 / 336419, contract award types A-D. Grants and
 loans have different money semantics and are out of scope for the first
 pass rather than silently mixed in.
+
+---
+
+## SEC EDGAR — added 2026-10-12, read at the source
+
+**Two documents, and only one of them has the number.**
+
+The EDGAR APIs page (`/search-filings/edgar-application-programming-interfaces`)
+says the APIs "do not require any authentication or API keys to access"
+and **states no rate limit at all**. The number is on the webmaster FAQ:
+
+> "Note that our current maximum access rate is 10 requests per second."
+
+An earlier draft of `src/funding/sec_edgar.py` credited the APIs page for
+that figure. Correct number, wrong source — the same error as quoting a
+rate limit for USAspending that nobody had published, run in reverse.
+**Cite the document that says it.**
+
+### The User-Agent is our policy, not EDGAR's rule
+
+The FAQ says *"Please declare your user agent in request headers"* and
+shows `Sample Company Name AdminContact@<domain>.com`. It does **not**
+say the contact address is required, and it does not say what happens
+when the limit is exceeded. It does mention an "Undeclared Automated
+Tool" error, so an undeclared client can be refused.
+
+`src/useragent.py` always declares project, version and purpose, so this
+client is never undeclared. Requiring `CONTACT_EMAIL` on top of that is
+**this project's choice** — an operator who can email you does not have
+to block you — and the module says so rather than claiming a mandate.
+
+| Control | Value |
+|---|---|
+| Published ceiling | 10 req/s (webmaster FAQ) |
+| What we hold to | **5 req/s** — a ceiling is not a target |
+| Hard cap per run | 60 requests (`--max-requests`) |
+| Cache TTL | 7 days |
+| Refuses to start | without `CONTACT_EMAIL` |
+
+### Which endpoint, and why
+
+| Endpoint | Used for |
+|---|---|
+| `submissions/CIK….json` | identity and SIC, in `--survey` only |
+| `companyconcept/CIK…/us-gaap/<tag>.json` | **the claims.** One concept, one filer, small payload |
+| `frames/us-gaap/<tag>/USD/CY….json` | **discovery and cross-checking only** |
+| `companyfacts/CIK….json` | not used. Every concept a filer ever reported, when we want two |
+| `companyfacts.zip` / `submission.zip` | recompiled nightly, whole dataset. **The answer for a real backfill**, not yet built |
+
+**Frames never write a claim.** The docs say a frame takes the fact
+"last filed that most closely fits the calendrical period requested",
+with ±30 days tolerance on an annual period. That hands the choice of
+vintage to a fitting rule we do not control, and `as_of_date` is part of
+`cost_claims`' natural key — three hours after AD-107, where a vintage
+error nearly stamped a 2026 total with a 1993 date. Period assignment
+stays ours, stated in `annual_facts()`.
+
+### SIC codes come from the SEC's own list, and ours were wrong
+
+EDGAR assigns every filer a code from the Division of Corporation
+Finance's SIC list. Read at the source 2026-10-12, the codes that put a
+filer in scope for this project are:
+
+| Code | SEC's own description |
+|---|---|
+| **3760** | Guided missiles & space vehicles & parts |
+| 3720 / 3721 / 3724 / 3728 | Aircraft; aircraft; aircraft engines & parts; aircraft parts & auxiliary equipment NEC |
+| 3812 | Search, detection, navigation, guidance, aeronautical systems |
+| 3663 | Radio & TV broadcasting & communications equipment |
+| 4812 | Radiotelephone communications |
+| 4899 | Communications services, NEC |
+
+`SPACE_SIC` shipped as `{"3760", "3761", "3663", "3669", "3812"}`, and
+the Data Source Register has said **"SIC 3761/3663"** since 2026-10-05.
+**There is no 3761 and no 3669 in the SEC's list.** Nothing filters on
+the constant yet, so the error was invisible; the first query that used
+it would have returned zero rows and read as "no US-listed space
+companies file with the SEC" rather than as a typo. Same shape as
+AD-105 — a tool reporting its own mistake as a finding about the world.
+`tests/test_api_compliance.py` now asserts 3760 present and 3761/3669
+absent, so the constant cannot drift back.
+
+The codes are **reported, never used to filter** in `sec_edgar.py`: a
+filer is in the seed because a person put it there with a written basis.
+The SIC only ever adds a line to a report. They matter because the bulk
+path below *is* organised by SIC.
+
+### DERA Financial Statement Data Sets — the bulk discovery path
+
+Separate from the APIs, the SEC's Division of Economic and Risk Analysis
+publishes quarterly ZIPs of the numeric data from the face financials of
+every XBRL filing: 2009 Q1 through 2026 Q3, ~62 MB each, flattened, and
+— the reason they matter here — carrying **each filer's SIC code**. One
+HTTP request per quarter, no per-filer walk, no rate limit to respect.
+
+That makes them the honest answer to "who are all the space filers":
+scan one quarter's ZIP for the SIC codes above and the universe falls
+out, instead of 16 hand-curated tickers. It is the same conclusion
+reached for USAspending — per-entity endpoints are for sampling, bulk is
+for loading history.
+
+**The SEC's own caveats, which must travel with any claim built from
+them:**
+
+- *"we cannot guarantee the accuracy of the data sets"*
+- errors *"were introduced into the data sets during the process of
+  extracting the data"*
+- *"the data sets do not reflect all available information"* and
+  *"they are not a substitute for such filings"*
+
+So a DERA-derived number is **not** the same evidence as a
+`companyconcept` number, even when both trace to one filing. If these
+are ever ingested, `cost_claims.source` must distinguish
+`sec_dera` from `sec_edgar` and the extraction caveat belongs in
+`derivation_basis`, because the resolver's whole job is to keep two
+claims about one fact apart rather than average them. **Not built.**
+Recorded so the next person does not re-derive it.
+
+### What is still required before this module makes a single request
+
+1. `CONTACT_EMAIL` set in `.env` — the client exits without it.
+2. Every `sec_ciks.tsv` row moved off `decision=pending`; `--apply`
+   refuses the file otherwise.
+3. Each `match` row's `org_code` present in `organizations`.
+
+Nothing above is an EDGAR requirement. All three are this project's.

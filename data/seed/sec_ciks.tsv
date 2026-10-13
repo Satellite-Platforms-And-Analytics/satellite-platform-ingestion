@@ -1,0 +1,57 @@
+# Curated SEC filer decisions for the MONEY layer, and the refusals.
+#
+# WHY TICKERS AND NOT CIKs
+# A CIK is the identifier that matters, and it is NOT written here,
+# because every CIK in this file would be one I typed from memory. The
+# ingester resolves ticker -> CIK from EDGAR's own
+# https://www.sec.gov/files/company_tickers.json and then confirms the
+# company's name and SIC from its submissions file. Identity comes from
+# the source, never from a guess.
+#
+# WHY A FILE AND NOT A TABLE
+# Same reason as org_aliases.tsv: a curated judgement belongs where it
+# shows up in a diff, not where it can be UPDATEd at 2am (AD-052).
+#
+# WHY NO NAME MATCHING
+# EDGAR gives a stable numeric identifier. Matching company names to
+# `organizations` is strictly worse than mapping a CIK by hand once --
+# and 2026-10-12 spent most of a morning on what name matching costs
+# (AD-108, AD-110). org_code is decided by a person who has read the
+# survey output, never inferred.
+#
+# decision: pending -> --apply REFUSES the row. The survey has not been
+#                      read and no org_code has been chosen yet.
+#           match   -> write claims, link to org_code
+#           claim   -> write claims with NO org_code. The company is a
+#                      real filer whose money we want; `organizations`
+#                      simply has no row for it, and AD-085 says the
+#                      link is an attribute rather than a requirement.
+#           refuse  -> no claims. Say why.
+#
+# Every ticker below is UNVERIFIED until `--survey` prints EDGAR's own
+# name and SIC beside it. Tickers are easier to be right about than
+# CIKs, which is the whole reason this column is tickers.
+#
+ticker	org_code	decision	basis
+LMT	-	pending	Lockheed Martin. SIC expected 3760/3761. organizations has LM; confirm against the survey before matching.
+NOC	-	pending	Northrop Grumman. GCAT models the business units and may have no parent row - 10-12 found exactly that. Expect `claim` rather than `match`.
+BA	-	pending	Boeing. organizations has BOE (Boeing Co.), the parent, as of the 10-12 re-match. Confirm.
+RTX	-	pending	RTX (Raytheon). organizations has RAYTH = "Raytheon Space and Information Systems", a BUSINESS UNIT. A filer's revenue is the enterprise's; coding it to a unit would be AD-101's defect. Expect `claim`.
+LHX	-	pending	L3Harris. Confirm presence in organizations.
+RKLB	-	pending	Rocket Lab. A pure-play launch operator, so GCAT very likely has it.
+ASTS	-	pending	AST SpaceMobile. Direct-to-cell constellation operator, so GCAT plausibly has a row; a heavy R&D filer, which is the metric this source is best at.
+PL	-	pending	Planet Labs. An imagery operator with a large fleet, so GCAT almost certainly has it. Watch the fiscal year: Planet's FY ends in January, so FY labels lag the calendar.
+SPIR	-	pending	Spire Global. Smallsat operator; also restated financials in 2024, which makes it the useful test of whether a later filing supersedes an earlier one on the same period end.
+BKSY	-	pending	BlackSky. Imagery operator. Small revenue base, so a quarterly fact mistaken for an annual one would be glaring rather than subtle - a good canary for the fp=FY filter.
+MNTS	-	pending	Momentus. May have delisted; the survey will say.
+RDW	-	pending	Redwire. Space infrastructure manufacturer rather than an operator, so GCAT may have no row at all; expect 'claim' rather than 'match'.
+LUNR	-	pending	Intuitive Machines. Lander developer, NASA CLPS contractor - so it should also appear in the USAspending claims, which makes it a candidate for a cross-source comparison.
+VSAT	-	pending	Viasat. Satellite communications operator, and large enough that its revenue dwarfs the pure-plays; useful for checking the resolver does not mix scales within one metric.
+IRDM	-	pending	Iridium. Constellation operator with a long filing history, so it should give the deepest annual series of any filer in this seed.
+GSAT	-	pending	Globalstar. organizations has GLOB, which won its collision on name_native. Confirm.
+# ── Deliberately absent, with the reason ──
+# SPACEX    not a filer. Private, no 10-K, nothing in EDGAR to read.
+# ULA       not a filer, and org_aliases.tsv already refuses the name:
+#           GCAT models it as two JV parents and a factory.
+# MAXAR     taken private 2023. Historical filings exist; left out of
+#           the first pass rather than mixed with current filers.
