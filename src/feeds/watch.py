@@ -106,6 +106,7 @@ _root = str(pathlib.Path(__file__).resolve().parents[2])
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
+from src.sic import SPACE_SIC                 # noqa: E402
 from src.useragent import user_agent          # noqa: E402
 
 SEED = (pathlib.Path(__file__).resolve().parent.parent.parent
@@ -663,6 +664,68 @@ def staleness(channel: dict, feed: "Feed",
                   f"{feed.stale_after_hours:g}h")
 
 
+def emptiness(items: list, seen_max: int) -> "tuple[str, str]":
+    """(verdict, sentence). verdict is ok | EMPTY | FIRST-EMPTY.
+
+    Added 2026-10-14, because `--verify` had just printed
+
+        HTTP 200  rss  0 item(s)
+        ok: last built 0m ago ... within 72h
+
+    for the arXiv feed. Freshly built, correctly titled, conditional-GET
+    headers offered, and **containing nothing** - and the module called
+    it ok, because its only health check read dates. That is the exact
+    failure this module was written to prevent, committed by the module
+    itself three days running (AD-105, AD-112, AD-113). A feed with zero
+    items cannot be distinguished from a query that matches nothing, and
+    "ok" is the one word that must not describe it.
+
+    Zero is not automatically a fault, though, and the difference is
+    history rather than a rule: a feed that has never been seen holding
+    items has nothing to be compared against, while a feed that held 200
+    yesterday and holds 0 today has said something. So the maximum item
+    count ever seen is kept in state and the verdict follows the
+    measurement, not an assumption.
+    """
+    n = len(items)
+    if n:
+        return "ok", f"{n} item(s)"
+    if seen_max > 0:
+        return "EMPTY", (f"0 items, and this feed has held as many as "
+                         f"{seen_max} before - either it is between "
+                         f"cycles or the query stopped matching, and "
+                         f"nothing here can tell those apart")
+    return "FIRST-EMPTY", ("0 items, and no item count has ever been "
+                           "recorded for it - so there is nothing to "
+                           "compare against yet. Poll again after its "
+                           "next build before believing the URL")
+
+
+def turnover(new_count: int, total: int) -> "str|None":
+    """A sentence when the whole window turned over, else None.
+
+    Measured 2026-10-14: `sec_xbrl_all` reported **200 new of 200
+    items** one day after its 200-item baseline was recorded. Every id
+    had changed. The SEC accepts thousands of filings a day and the feed
+    holds 200, so at a daily poll the window rotates completely and the
+    items in between are simply gone.
+
+    This matters more than it looks. It means a 200-item window on a
+    firehose is a SAMPLING instrument, not a change log, and reporting
+    "200 new" invites exactly the opposite reading. Completeness for
+    MONEY comes from the bulk zips and companyconcept, as already
+    recorded for USAspending (AD-060); this feed answers "something is
+    happening", at best.
+    """
+    if total and new_count >= total:
+        return (f"the ENTIRE {total}-item window is new, so items "
+                f"between polls were missed - this feed is a sampler at "
+                f"this poll rate, not a change log. Poll nearer the "
+                f"publisher's cadence or use the bulk path for "
+                f"completeness")
+    return None
+
+
 def _ago(d: timedelta) -> str:
     s = int(d.total_seconds())
     if s < 0:
@@ -675,6 +738,36 @@ def _ago(d: timedelta) -> str:
 
 
 # ── modes ─────────────────────────────────────────────────────────────
+
+def split_by_sic(items: "list[dict]") -> "tuple[list, list]":
+    """(in_scope, other) for items that carry a SIC; ([], items) if none do.
+
+    Added after the 2026-10-14 poll printed 301 items, of which roughly
+    six were about space. `sec_xbrl_all`'s first twelve were eight
+    Morgan Stanley 424B2 prospectuses; the one filing that mattered,
+    `Ondas Inc. [8-K SIC 3663]`, was further down a list nobody would
+    have read to the end of.
+
+    The filter changes WHAT A HUMAN IS SHOWN. It does not decide what is
+    true, and the out-of-scope items are always counted out loud with
+    their top SICs, so it cannot hide its own effect - which is the
+    whole difference between a digest and a silent drop.
+    """
+    coded = [i for i in items if i.get("sic")]
+    if not coded:
+        return [], items
+    in_scope = [i for i in items if i.get("sic") in SPACE_SIC]
+    return in_scope, [i for i in items if i not in in_scope]
+
+
+def _top_sics(items: "list[dict]", n: int = 4) -> str:
+    from collections import Counter
+    c = Counter(i.get("sic") or "?" for i in items)
+    if not c:
+        return ""
+    top = ", ".join(f"{k}x{v}" for k, v in c.most_common(n))
+    return f" (top: {top})"
+
 
 def cmd_list(feeds: "list[Feed]") -> None:
     print(f"\n{len(feeds)} feed(s) in {SEED.name}\n")
@@ -736,11 +829,15 @@ def cmd_verify(feeds: "list[Feed]", c: Client, only: "list[str]|None",
             faults += 1
             continue
         verdict, sentence = staleness(channel, f)
+        e_verdict, e_sentence = emptiness(items, 0)
         print(f"    HTTP {status}  {channel['format']}  "
               f"{len(items)} item(s)  conditional-GET headers: "
               f"{'yes' if got else 'NONE OFFERED'}")
         print(f"    title: {channel['title'][:68]}")
         print(f"    {verdict}: {sentence}")
+        if e_verdict != "ok":
+            print(f"    {e_verdict}: {e_sentence}")
+            faults += 1
         if items and items[0]["published"]:
             print(f"    newest item: {items[0]['published'].date()}  "
                   f"{items[0]['title'][:52]}")
@@ -807,6 +904,11 @@ def cmd_poll(feeds: "list[Feed]", c: Client, include_unverified: bool,
             notes.append(f"{f.key}: {verdict} - {sentence}")
         if channel.get("built"):
             st["last_build"] = channel["built"].isoformat()
+        e_verdict, e_sentence = emptiness(items, int(st.get("max_items", 0)))
+        if e_verdict != "ok":
+            notes.append(f"{f.key}: {e_verdict} - {e_sentence}")
+        st["max_items"] = max(int(st.get("max_items", 0)), len(items))
+
         seen = set(st.get("seen", []))
         fresh = [i for i in items if i["id"] and i["id"] not in seen]
         first_run = not seen
@@ -817,6 +919,9 @@ def cmd_poll(feeds: "list[Feed]", c: Client, include_unverified: bool,
             notes.append(f"{f.key}: first run, {len(items)} item(s) "
                          f"recorded as the baseline, none reported as new")
         elif fresh:
+            t = turnover(len(fresh), len(items))
+            if t:
+                notes.append(f"{f.key}: {t}")
             by_cap.setdefault(f.cap, []).append((f, fresh))
         ids = [i["id"] for i in items if i["id"]]
         st["seen"] = (ids + st.get("seen", []))[:SEEN_PER_FEED]
@@ -831,14 +936,28 @@ def cmd_poll(feeds: "list[Feed]", c: Client, include_unverified: bool,
             print(f"\n  == {cap} ==")
             for f, fresh in by_cap[cap]:
                 print(f"\n  {f.key}  ({len(fresh)} new)")
-                for i in fresh[:12]:
+                in_scope, other = split_by_sic(fresh)
+                for i in (in_scope if in_scope else fresh)[:12]:
                     when = (i["published"].date().isoformat()
                             if i["published"] else "undated")
                     tag = ""
                     if i["form"]:
-                        tag = f"  [{i['form']} SIC {i['sic'] or '?'}]"
+                        # Multi-line expressions inside an f-string brace
+                        # are a 3.12 feature; this runs on 3.11. Build
+                        # the pieces first.
+                        label = SPACE_SIC.get(i["sic"], "")
+                        label = f" {label[:28]}" if label else ""
+                        tag = (f"  [{i['form']} SIC "
+                               f"{i['sic'] or '?'}{label}]")
                     print(f"    {when}  {i['title'][:62]}{tag}")
-                if len(fresh) > 12:
+                if in_scope:
+                    shown = min(len(in_scope), 12)
+                    if len(in_scope) > shown:
+                        print(f"    ... and {len(in_scope) - shown} more "
+                              f"in scope")
+                    print(f"    + {len(other)} filing(s) outside the "
+                          f"in-scope SIC list" + _top_sics(other))
+                elif len(fresh) > 12:
                     print(f"    ... and {len(fresh) - 12} more")
     else:
         print("  No new items.")

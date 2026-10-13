@@ -709,3 +709,62 @@ different findings:
 | **ESA** | Feeds exist, but `esa.int/Services/RSS_Feeds` says the list *"is available on the right"* and the sidebar did not render to the fetcher. The URLs were **not read**. Open it in a browser, then `--check` |
 
 Nothing above went in as a guess. That is the whole rule.
+
+### What the first real poll taught — 2026-10-14
+
+The first `--poll` that could report anything reported 301 new items,
+and two things in that output were defects here rather than findings
+about the sources.
+
+**`0 item(s)` followed by `ok`.** The arXiv feed came back HTTP 200,
+correctly titled, freshly built, conditional-GET headers offered, and
+**empty** — and the watcher called it healthy, because its only health
+check read `lastBuildDate`. A feed can be rebuilt punctually and match
+nothing, and no date will ever say so. The module written because *"an
+absent result is the most confident falsehood a system can produce"*
+produced one.
+
+`emptiness()` now reports it, and the verdict follows a measurement
+rather than a rule, because zero is not automatically wrong:
+
+| State | Verdict |
+|---|---|
+| items present | ok |
+| 0 items, never seen holding any | **FIRST-EMPTY** — nothing to compare against yet; poll again after its next build before believing the URL |
+| 0 items, has held up to N before | **EMPTY** — either between cycles or the query stopped matching, and nothing here can tell those apart |
+
+That last sentence names both explanations and declines to pick one,
+because the module cannot distinguish them. **The arXiv row stays a
+candidate until `--check https://rss.arxiv.org/rss/astro-ph.IM`
+settles whether the `+` multi-category syntax works the way its help
+page describes.** One request answers it.
+
+**`200 new of 200 items`.** `sec_xbrl_all` turned over its entire
+window in one day; `sec_xbrl_usgaap` turned over 93 of 200 in the same
+period. The SEC accepts thousands of filings a day into a 200-item
+feed, so at a daily poll everything between polls is gone.
+
+**A fixed window on a firehose is a sampling instrument, not a change
+log**, and "200 new" invites exactly the wrong reading — it looks like
+a day's account and is a sample of the last few minutes. A full
+turnover is now reported as such, beside the number. For the money
+layer this is the conclusion already reached for USAspending and the
+EDGAR bulk zips: **completeness comes from bulk; the feed answers
+"something is happening".**
+
+**And the digest now splits on SIC.** Of those 301 items about six
+concerned space, and `sec_xbrl_all`'s first twelve were eight Morgan
+Stanley 424B2 prospectuses while `Ondas Inc. [8-K SIC 3663]` — the one
+that mattered — sat further down. The split uses the SEC's own list,
+which is what it was read from source for, and the out-of-scope items
+are **still counted out loud with their top codes**, so the filter
+cannot hide its own effect. That is the difference between a digest and
+a silent drop.
+
+Sharing that list moved `SPACE_SIC` into a dependency-free
+**`src/sic.py`**. `sec_edgar.py` imports `src.db.writer` and
+`sqlalchemy` at module level, so importing it for the codes would have
+dragged a database engine factory into the module whose contract is
+that it does not touch the database — and a second copy of the dict is
+AD-112 with the serial numbers filed off. A test asserts exactly one
+definition exists.

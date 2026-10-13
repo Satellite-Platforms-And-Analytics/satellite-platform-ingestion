@@ -343,7 +343,13 @@ def test_the_watcher_cannot_write_to_the_database():
             t.string for t in tokenize.generate_tokens(fh.readline)
             if t.type not in (tokenize.COMMENT, tokenize.STRING))
     for forbidden in ("src.db", "sqlalchemy", "psycopg", "DATABASE_URL",
-                      "INSERT", "cost_claims", "engine", "commit"):
+                      "INSERT", "cost_claims", "engine", "commit",
+                      # sec_edgar imports src.db.writer and sqlalchemy at
+                      # module level and calls bootstrap(). Importing it
+                      # for SPACE_SIC would drag a database engine
+                      # factory in through the back door, which is why
+                      # the constant moved to src/sic.py on 2026-10-14.
+                      "sec_edgar"):
         assert forbidden not in code, (
             f"{forbidden!r} appears in watch.py's executable code: this "
             f"module reports, it does not ingest")
@@ -489,3 +495,73 @@ def test_a_registry_feed_on_arxiv_is_covered_by_that_floor():
     for f in arxiv:
         assert "info.arxiv.org/help/api/tou" in f.basis, (
             f"{f.key}'s basis must name where its terms were read")
+
+
+# ── zero items, and the day the module failed its own thesis ─────────
+
+def test_zero_items_on_a_feed_that_has_held_items_is_a_fault():
+    """2026-10-14: --verify printed "HTTP 200  rss  0 item(s)" and then
+    "ok", for arXiv. Freshly built, correctly titled, conditional-GET
+    headers offered, and containing nothing. The only health check read
+    dates, so an empty feed passed - the exact failure this module
+    exists to prevent, committed by the module itself."""
+    verdict, sentence = watch.emptiness([], seen_max=200)
+    assert verdict == "EMPTY"
+    assert "stopped matching" in sentence
+
+
+def test_zero_items_with_no_history_says_so_rather_than_guessing():
+    """Zero is not automatically a fault, and the difference is history,
+    not a rule: a feed never seen holding items has nothing to be
+    compared against."""
+    verdict, sentence = watch.emptiness([], seen_max=0)
+    assert verdict == "FIRST-EMPTY"
+    assert "nothing to" in sentence
+    assert watch.emptiness([{"id": "x"}], seen_max=0)[0] == "ok"
+
+
+def test_a_fully_turned_over_window_is_reported_as_a_sampler():
+    """Measured: sec_xbrl_all reported 200 new of 200 items one day
+    after its 200-item baseline. Every id had changed, so the items in
+    between are gone. Reporting "200 new" without this invites the
+    reading that 200 things happened."""
+    msg = watch.turnover(200, 200)
+    assert msg and "sampler" in msg
+    assert watch.turnover(93, 200) is None
+
+
+# ── the SIC digest split ─────────────────────────────────────────────
+
+def test_the_sic_split_finds_the_one_filing_that_mattered():
+    """The real shape of the 10-14 poll: Morgan Stanley prospectuses
+    burying one in-scope filing. 3663 is in the SEC's list; 6211 and
+    2834 are not."""
+    items = [{"sic": "6211", "title": "MORGAN STANLEY"} for _ in range(8)]
+    items += [{"sic": "2834", "title": "Apimeds Pharmaceuticals"},
+              {"sic": "3663", "title": "Ondas Inc."}]
+    in_scope, other = watch.split_by_sic(items)
+    assert [i["title"] for i in in_scope] == ["Ondas Inc."]
+    assert len(other) == 9
+    assert "6211x8" in watch._top_sics(other)
+
+
+def test_items_without_a_sic_are_never_filtered_away():
+    """NASA items carry no SIC. A filter that silently dropped them
+    would turn an EVENT digest into an empty one."""
+    items = [{"sic": "", "title": "NASA launches something"}]
+    in_scope, other = watch.split_by_sic(items)
+    assert in_scope == [] and other == items
+
+
+def test_the_sic_list_has_exactly_one_definition():
+    """Two copies of an identifier list, drifting, one of them wrong, is
+    AD-112 with the serial numbers filed off. src/sic.py is the only
+    place the codes are written down."""
+    import pathlib
+    root = pathlib.Path(watch.__file__).resolve().parents[2] / "src"
+    defining = [p for p in root.rglob("*.py")
+                if "SPACE_SIC = {" in p.read_text(encoding="utf-8")]
+    assert [p.name for p in defining] == ["sic.py"], defining
+    from src.sic import SPACE_SIC as canonical
+    from src.funding.sec_edgar import SPACE_SIC as reexported
+    assert canonical is reexported

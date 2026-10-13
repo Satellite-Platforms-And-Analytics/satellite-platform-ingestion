@@ -192,29 +192,16 @@ NOT_FILED = {
                   "derivation_basis naming the price and its date.",
 }
 
-#: SIC codes that say "this filer might be in scope", taken VERBATIM from
-#: the SEC's own Division of Corporation Finance SIC list (read at source
-#: 2026-10-12), which is the list EDGAR itself assigns from. Reported,
-#: never used to filter: a filer in the seed is there because a person put
-#: it there, and the SIC only ever adds a line to a report.
+#: The SEC's in-scope SIC codes. MOVED to src/sic.py on 2026-10-14 so
+#: that src/feeds/watch.py could read the same nine codes without
+#: importing this module, which pulls in src.db.writer and sqlalchemy.
+#: The alternative was a second copy of the list, which is AD-112 with
+#: the serial numbers filed off. Re-exported here because this module's
+#: own tests and docstrings refer to it by this name.
 #:
-#: Written from 2026-10-12 onward because the first version of this
-#: constant carried "3761" and "3669", neither of which exists in the
-#: SEC's list. The real code for the obvious one is 3760. A discovery
-#: query filtered on 3761 would have returned zero rows and looked like
-#: an empty universe rather than a typo -- the same failure shape as
-#: AD-105, where an instrument reported its own setting.
-SPACE_SIC = {
-    "3760": "Guided missiles & space vehicles & parts",
-    "3720": "Aircraft & parts",
-    "3721": "Aircraft",
-    "3724": "Aircraft engines & engine parts",
-    "3728": "Aircraft parts & auxiliary equipment, NEC",
-    "3812": "Search, detection, navigation, guidance, aeronautical systems",
-    "3663": "Radio & TV broadcasting & communications equipment",
-    "4812": "Radiotelephone communications",
-    "4899": "Communications services, NEC",
-}
+#: Here it is REPORTED, never used to filter: a filer is in the seed
+#: because a person put it there with a written basis.
+from src.sic import SPACE_SIC                                 # noqa: E402
 
 
 class Client:
