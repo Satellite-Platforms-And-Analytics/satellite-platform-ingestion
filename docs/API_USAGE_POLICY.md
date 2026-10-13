@@ -820,3 +820,39 @@ Three cases, not two:
 | No SIC at all (every NASA item) | print them; never filter |
 | Coded, some in scope | print those, then count the rest with their top codes |
 | Coded, none in scope | **"0 of 6 in scope"** and the top codes — not six arbitrary filings |
+
+### Resolved: arXiv's RSS service is serving empty feeds — 2026-10-14
+
+One more `--check` settled it, against the busiest category arXiv has.
+
+| Feed | Bytes | Items | `lastBuildDate` |
+|---|---|---|---|
+| `astro-ph.IM` | 916 | **0** | `2026-10-13T04:00:05Z` |
+| `cs.LG` — hundreds of papers a day | 892 | **0** | `2026-10-13T04:00:15Z` |
+
+**Ten seconds apart.** One batch job ran at 04:00 UTC on 2026-10-13,
+built every category feed as an empty envelope, and nothing has rebuilt
+since. So it is not the `+` syntax, not category-specific, and not our
+access — arXiv's RSS service is producing empty feeds across the board,
+while its own status endpoint reports **"Status: GOOD"**.
+
+That last clause is the reusable part. **A publisher's health endpoint
+is a claim, not a measurement.** `rss.arxiv.org/feed/status` would have
+told a watcher that trusted it everything was fine; counting the items
+is what told the truth. This is why `emptiness()` reads the payload and
+not the publisher's self-report, and it is the same lesson as AD-113's
+`lastBuildDate` — every signal a source offers about its own health is
+evidence, and none of it substitutes for looking at what arrived.
+
+**The row is kept, not deleted.** It costs one request per poll, the
+EMPTY verdict is a standing re-check, and `--verify` will promote it on
+its own the day arXiv's batch job produces items again. A deleted row
+would need someone to remember.
+
+**Deliberately not built:** a per-host rollup. Two feeds on one host,
+built ten seconds apart, both empty, is evidence of one upstream batch
+rather than two coincidences — and a watcher could say *"this host's
+feed service looks broken"* instead of printing N separate EMPTY lines.
+With one arXiv row in the registry that would be machinery for a
+problem nobody has. Recorded so the next person does not re-derive it
+when there are five.
