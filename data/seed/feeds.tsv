@@ -1,0 +1,37 @@
+# Feed registry — the sources this project watches for NEW information.
+#
+# One row per feed. Columns are TAB separated:
+#
+#   key              stable short name, used in state and reports
+#   url              the feed URL
+#   cap              what it can tell us: OBJ ORG MONEY EVENT TECH POLICY
+#   cadence_minutes  how often the PUBLISHER says it updates, 0 = unstated
+#   verified         yes|no — has this URL been fetched and parsed BY US
+#   verified_on      ISO date of that measurement, or blank
+#   basis            why this feed is in the list. >40 chars. A reviewer
+#                    must be able to act on it without asking anyone.
+#
+# RULE, and the reason this file ships mostly unverified:
+# a feed URL recalled from memory is a guess (AD-112 — there is no SIC
+# 3761). Every row below that says verified=no has NOT been fetched by
+# this project. `python -m src.feeds.watch --verify` fetches each one
+# from YOUR network, records what actually came back, and rewrites the
+# verified/verified_on columns. Until then the rows are candidates, not
+# sources, and --poll skips them unless given --include-unverified.
+#
+# The four SEC rows were measured through the session's fetcher on
+# 2026-10-13 and are marked verified=no ANYWAY, because that fetcher is
+# not the network the pipeline runs on and two of the three XBRL feeds
+# came back months stale. Re-measure locally. See the staleness note in
+# docs/API_USAGE_POLICY.md.
+#
+key	url	cap	cadence_minutes	verified	verified_on	basis
+sec_press	https://www.sec.gov/news/pressreleases.rss	POLICY	0	yes	2026-10-13	SEC press releases. Enforcement and rule changes that move a filer's disclosure obligations, which is upstream of every number sec_edgar.py reads.
+sec_litigation	https://www.sec.gov/enforcement-litigation/litigation-releases/rss	POLICY	0	yes	2026-10-13	SEC litigation releases. A filer under enforcement is a filer whose reported figures may be restated; a restatement is a competing claim, not a correction.
+sec_xbrl_usgaap	https://www.sec.gov/Archives/edgar/usgaap.rss.xml	MONEY	10	yes	2026-10-13	Up to 200 latest filings with US-GAAP or IFRS tagged financial statements, carrying edgar:cikNumber and edgar:assignedSic. The arrival signal for sec_edgar.py — tells us a NEW 10-K exists without polling 16 filers.
+sec_xbrl_all	https://www.sec.gov/Archives/edgar/xbrlrss.all.xml	MONEY	10	yes	2026-10-13	All XBRL filings, up to 200. Broader than the US-GAAP feed and the cheapest way to notice a space filer we have not seeded, because every item carries its SIC.
+nasa_news	https://www.nasa.gov/news-release/feed/	EVENT	0	yes	2026-10-13	NASA news releases. Mission milestones, award announcements and programme changes — the EVENT cap, and one of the news sources the cost model is meant to build inferences from.
+nasa_technology	https://www.nasa.gov/technology/feed/	TECH	0	yes	2026-10-13	NASA technology news. Directly adjacent to the TechPort TRL data already ingested; a TRL change is usually announced here before TechPort's record moves.
+nasa_jpl	https://www.nasa.gov/centers-and-facilities/jpl/feed/	EVENT	0	yes	2026-10-13	JPL centre news. Highest spacecraft-per-release rate of any NASA centre feed, which is what makes it worth a row of its own rather than relying on the firehose.
+nasa_all	https://www.nasa.gov/feed/	EVENT	0	yes	2026-10-13	NASA recently-published content, all of it. Listed as the fallback if the topical feeds prove too narrow; expected to be noisy enough that it stays off by default.
+fed_register_sec	https://www.federalregister.gov/articles/search.rss?conditions%5Bagency_ids%5D%5B%5D=466	POLICY	0	no		Federal Register, SEC agency id 466 — the URL pattern is the SEC's own, taken from sec.gov/about/rss-feeds. Proves the conditions[agency_ids][] parameter works, so FCC and NOAA rows can be added the same way once their ids are READ rather than guessed.

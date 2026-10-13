@@ -479,3 +479,106 @@ Recorded so the next person does not re-derive it.
 3. Each `match` row's `org_code` present in `organizations`.
 
 Nothing above is an EDGAR requirement. All three are this project's.
+
+---
+
+## Feeds — added 2026-10-13
+
+`src/feeds/watch.py` watches RSS and Atom feeds so this project finds out
+that something is new without re-downloading anything to discover it.
+`data/seed/feeds.tsv` is the registry: one row per feed, with a written
+basis, and a `verified` column that starts at **no**.
+
+### Conditional GET is the whole politeness argument
+
+A feed is the cheapest thing a publisher serves, and only if the client
+sends back what it was given. This module stores each feed's `ETag` and
+`Last-Modified` and sends `If-None-Match` and `If-Modified-Since` on
+every poll, so an unchanged feed answers **304 with no body at all**.
+The steady state of watching ten feeds is ten requests that transfer
+nothing.
+
+A watcher without conditional GET re-downloads every feed on every run
+and is indistinguishable, from the operator's side, from a scraper.
+
+| Control | Value |
+|---|---|
+| Requests per feed per run | **1** |
+| Minimum interval per host | 2 s, raised by any published `Crawl-delay` |
+| Hard cap per run | 40 requests, robots.txt fetches included |
+| Unverified rows | **not polled** unless `--include-unverified` |
+| Writes to the database | **none** |
+
+### robots.txt: three outcomes, not two
+
+RFC 9309 §2.3.1 distinguishes cases this module got wrong on the first
+pass:
+
+| robots.txt answers | What it means | What we do |
+|---|---|---|
+| 2xx | rules exist | parse and obey, `Crawl-delay` included |
+| 4xx | *"crawlers MAY access any resources"* | fetch |
+| 5xx or network error | *"crawlers SHOULD assume complete disallow"* | **skip the host** |
+
+The first version collapsed 4xx and unreachable into one permissive
+branch and its own docstring claimed the RFC said so. It does not. The
+bug surfaced within the hour: `--verify` run from an environment whose
+egress proxy answers 403 for every host printed *"treating as no
+rules"* for a host it had never spoken to. **A host whose rules we
+cannot read is not a host with no rules** — and guessing permissive
+there is exactly what earns the IP block the standing instruction says
+to avoid. There is deliberately no `--ignore-robots` flag.
+
+This matters immediately for EDGAR. The SEC's own RSS page recommends
+its *Latest Filings* Atom feed at
+`/cgi-bin/browse-edgar?action=getcurrent&output=atom`, and the session's
+fetcher refused that URL citing the target's robots rules. So a feed the
+publisher recommends may sit on a path the publisher disallows. This
+module resolves that by asking `robots.txt` at poll time rather than
+taking anyone's word for it.
+
+### A feed that is late is a finding, not silence
+
+A watcher that reports only new items cannot tell *"nothing happened"*
+from *"this feed died six months ago"* — both render as an empty list.
+So `staleness()` compares the channel's own `lastBuildDate` against the
+cadence the publisher declares, and a feed more than **6×** its declared
+cadence behind is reported as **LATE**. A feed with no date at all is
+reported as **UNDATED**, which is deliberately not the same as ok.
+
+It paid for itself on the day it was written. All three SEC structured-
+data feeds describe themselves as *"updated every ten minutes"*:
+
+| Feed | `lastBuildDate` read 2026-10-13 |
+|---|---|
+| `usgaap.rss.xml` | Fri, 24 Apr 2026 18:50:03 EDT |
+| `xbrl-inline.rss.xml` | Fri, 24 Apr 2026 18:50:02 EDT |
+| `xbrlrss.all.xml` | Fri, 27 Feb 2026 07:50:02 EST |
+
+Two agreeing to the second, one seven weeks earlier. **Measured through
+the session's fetcher, which is not the network this pipeline runs on**,
+so it is recorded as something to re-measure rather than as a fact about
+the SEC — the three different dates argue against a single shared cache,
+but that is an inference, not a reading. Either way those rows ship
+`verified=no` and the check is now permanent.
+
+### Nothing here writes to the database, on purpose
+
+A feed item is evidence that a claim might exist. It is not a claim.
+The architectural steer says money information will come from many
+sources including news and be built up by inference over time — which
+is an argument for a person, or a module that can state its reasoning,
+writing `cost_claims` with a `derivation_basis` naming the item. It is
+not an argument for a headline becoming a number with no vintage and no
+author. `tests/test_feeds.py` asserts that `watch.py`'s executable code
+contains no reference to `src.db`, `sqlalchemy`, `cost_claims` or
+`DATABASE_URL`, because a docstring saying so is not a control (AD-098).
+
+### What is required before the first poll
+
+1. `python -m src.feeds.watch --verify --apply` **from the network the
+   pipeline runs on.** Every row ships unverified; `--poll` skips them.
+   Neither the session's fetcher nor the device VM can reach sec.gov or
+   nasa.gov, so this is the user's to run.
+2. Read the first `--poll` output before trusting the next one: the
+   first run records a baseline and reports **no** new items by design.
