@@ -856,3 +856,140 @@ feed service looks broken"* instead of printing N separate EMPTY lines.
 With one arXiv row in the registry that would be machinery for a
 problem nobody has. Recorded so the next person does not re-derive it
 when there are five.
+
+---
+
+## EDGAR bulk, local — added 2026-10-14
+
+`submissions.zip` and `companyfacts.zip` were downloaded to
+`D:\Projects\Data\SEC_EDGAR`. `src/funding/edgar_universe.py` scans the
+submissions records for the nine in-scope SIC codes from `src/sic.py`.
+
+**This takes discovery offline.** No rate limit, no robots.txt, no
+User-Agent, no `CONTACT_EMAIL` gate — these are file reads. The policy
+above still governs live calls in `sec_edgar.py` and has nothing to say
+about this module.
+
+It replaces the 16 hand-picked tickers in `data/seed/sec_ciks.tsv` as
+the *discovery* method. It does not replace them as the seed: output
+goes to `<bulk>/derived/space_filers_<date>.tsv` as a regenerable
+artifact, and promotion into the seed stays a human act with a written
+basis. "The SEC says SIC 3760" and "this project claims space company"
+are different sentences.
+
+### The collision, which is the headline
+
+**Both zips name their members `CIK##########.json`.** Extracted into
+one directory, the second silently overwrites the first for every CIK
+present in both. Measured on an evenly spaced sample of 1,202 of the
+988,520 records:
+
+| Shape | Share | Projected | Carries |
+|---|---|---|---|
+| submissions | 98.3% | ~971,249 | `sic`, `name`, `filings` |
+| companyfacts | 1.7% | ~17,270 | `entityName`, `facts`, **no `sic`** |
+
+**1.7% sounds survivable and is not.** companyfacts contains only
+filers that publish XBRL financial statements — operating companies
+with real numbers, which is exactly the population this scan is for.
+Lockheed, Northrop, RTX and Boeing are all in that 1.7%, and for every
+one of them the record carrying the SIC is gone. The loss is not a
+random sample; it is biased precisely against what matters.
+
+**Fix:** re-extract each zip into its own subdirectory
+(`SEC_EDGAR\submissions\`, `SEC_EDGAR\companyfacts\`) and re-run. The
+scan refuses to call its own output complete while companyfacts-shaped
+records are present.
+
+### Four counters, because three of them were once one
+
+Measured on the first 3,000 records, and every boundary here was a
+mistake first:
+
+| Counter | 3,000-record sample | What it means |
+|---|---|---|
+| in scope | 34 | matched one of the nine SIC codes |
+| `sic` `0000`/`""` | 1,146 | **a value the SEC assigned.** CIK 3, a municipal trust, really is `0000` |
+| companyfacts | 584 | a different dataset under the same filename |
+| empty | 3 | the two bytes `{}` — the SEC ships some that way |
+| unreadable | **0** | neither shape, not empty. A real scanner failure |
+
+The first version had one counter, `SIC NOT FOUND`, labelled *"a
+failure of THIS scanner"*. It reported 587 — and the reader had worked
+perfectly every time, on documents of other shapes. Then the
+replacement called three empty `{}` files failures too, twenty minutes
+later, in the same function. **A counter must not assert a cause it has
+not established**, which is now the fifth instance of that shape after
+AD-105, AD-112, AD-113 and AD-116.
+
+### Two measurements that shaped the code
+
+**`sic` is past the first 4KB in 21% of records** (found in the first
+4KB of 238 of 300). A head-read scanner would miss a fifth of the
+universe and report the misses as "no SIC". So the reader grows its
+window until it finds the key or the file ends.
+
+**79 files/sec through the device-bridge mount**, projecting ~3.5
+hours. That measures the *mount*, not a native run on `D:\`, and the
+two are not comparable — so the scan checkpoints to
+`<bulk>/derived/scan_state.json` every 30 seconds and resumes, rather
+than assuming it finishes.
+
+### Split confirmed, and what the scan actually returns — 2026-10-17
+
+Both zips re-extracted into their own subdirectories and verified:
+
+| Directory | Records | Sampled shape |
+|---|---|---|
+| `SEC_EDGAR\submissions\` | 988,520 filers + 5,394 continuation | **401 of 401 submissions-shaped** |
+| `SEC_EDGAR\companyfacts\` | 20,455 | 98.8% companyfacts, 1.2% empty `{}` |
+
+On 7,628 records scanned from the clean directory: **94 in scope, 0
+companyfacts, 0 empty, 0 unreadable.** The merged directory gave 584
+companyfacts in 3,000. The collision is gone.
+
+Two controls were added because of it, and one of them caught a second
+bug within the hour:
+
+- **`precheck()`** samples 200 records at startup and refuses to scan
+  a directory where more than 1% are the wrong dataset. The threshold
+  is not zero: companyfacts ships a few empty `{}` documents and one
+  stray file is not a merged directory. A guard that fires on noise
+  gets switched off.
+- **The file index now records which directory it was built from.**
+  Repointing `--bulk-dir` at `submissions/` silently reused the index
+  cached from the merged directory, because the file existed. Both
+  held the same CIKs, so it would have been right for the wrong
+  reason — and the next time the paths diverged it would have scanned
+  one directory using another's file list. *A cache that cannot say
+  what it is a cache of is not a cache.*
+
+**What the nine codes actually return.** 94 in 7,628 is 1.23%, which
+projects to roughly **12,000 filers** across the full set — and the
+breakdown says why:
+
+| SIC | Hits in 7,628 | |
+|---|---|---|
+| 3663 | 32 | Radio & TV broadcasting & communications equipment |
+| 3812 | 20 | Search, detection, navigation, guidance |
+| 3728 | 8 | Aircraft parts & auxiliary equipment |
+| 4812 | 7 | Radiotelephone communications |
+| 3724 | 7 | Aircraft engines & engine parts |
+| **3760** | **7** | **Guided missiles & space vehicles & parts** |
+| 3721 | 5 | Aircraft |
+| 4899 | 5 | Communications services, NEC |
+| 3720 | 3 | Aircraft & parts |
+
+**3760 — the actual space code — is 7 of 94.** The rest are
+communications and electronics firms that happen to share an office
+with space hardware at the SEC. So the output is a **candidate pool,
+not a list of space companies**, and the 12,000 figure is the size of
+the haystack rather than a finding. That is precisely why promotion
+into `data/seed/sec_ciks.tsv` stays manual: an SIC is the SEC's
+filing-office assignment, not this project's judgement.
+
+Narrowing to 3760 alone would give perhaps 900 filers and would miss
+every satellite operator filing under 4899 and every payload builder
+under 3663. Neither the broad list nor the narrow one is right by
+itself, which is a decision to make against the real distribution
+once the full scan has run — not before.
