@@ -963,7 +963,22 @@ def cmd_poll(feeds: "list[Feed]", c: Client, include_unverified: bool,
                 # the six new usgaap items were pharma, finance and oil,
                 # and listing them implied they had been judged
                 # relevant.
-                show = in_scope if (in_scope or not coded) else []
+                # Three cases, spelled out. The one-line version of
+                # this read `in_scope if (in_scope or not coded) else
+                # []`, which for an UNCODED feed evaluates the
+                # condition True and then returns in_scope - i.e. []. So
+                # every NASA digest printed "(10 new)" and listed
+                # nothing, which is exactly the filter-hiding-its-own-
+                # effect failure the three cases exist to prevent.
+                # Found 2026-10-19 by reading a poll, not by a test:
+                # the test covered split_by_sic, which was correct, and
+                # not the caller, which was not.
+                if in_scope:
+                    show = in_scope
+                elif not coded:
+                    show = fresh          # no SIC anywhere: never filter
+                else:
+                    show = []             # coded, none in scope
                 for i in show[:12]:
                     when = (i["published"].date().isoformat()
                             if i["published"] else "undated")

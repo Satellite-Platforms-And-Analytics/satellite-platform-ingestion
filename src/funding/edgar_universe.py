@@ -190,13 +190,21 @@ def filer_detail(path: str) -> dict:
         "name": (d.get("name") or "").strip(),
         "sic": str(d.get("sic") or ""),
         "sic_description": (d.get("sicDescription") or "").strip(),
-        "tickers": ",".join(d.get("tickers") or []),
-        "exchanges": ",".join(d.get("exchanges") or []),
+        # `or []` guards a MISSING or null key; it does not guard a
+        # list that CONTAINS null. Real EDGAR records do: a filer with
+        # a ticker and no exchange carries exchanges: [None], which
+        # crashed the scan at record ~820,000 on 2026-10-19 with
+        # "sequence item 0: expected str instance, NoneType found".
+        # Coerce and drop per element.
+        "tickers": ",".join(str(x) for x in (d.get("tickers") or []) if x),
+        "exchanges": ",".join(
+            str(x) for x in (d.get("exchanges") or []) if x),
         "state": (d.get("stateOfIncorporation") or "").strip(),
         "entity_type": (d.get("entityType") or "").strip(),
         "former_names": " | ".join(
             (n.get("name") or "").strip()
-            for n in (d.get("formerNames") or []))[:300],
+            for n in (d.get("formerNames") or [])
+            if isinstance(n, dict))[:300],
         "filings_recent": str(len(forms)),
         "tenk_count": str(len(tenk)),
         "latest_10k": max(tenk) if tenk else "",
@@ -360,6 +368,26 @@ def main(argv: "list[str]|None" = None) -> int:
         # a fresh file would otherwise write rows with no header, which
         # is what happened to space_filers_2026-10-16.tsv.
         out_f.write_text("\t".join(COLUMNS) + "\n", encoding="utf-8")
+
+    if start and out_f.is_file():
+        # The save block writes rows and THEN the checkpoint. A crash
+        # between the two would re-find the same filers on resume and
+        # append them twice, so the output is made idempotent here
+        # rather than relying on a window never being hit.
+        lines = out_f.read_text(encoding="utf-8").splitlines()
+        seen, keep = set(), []
+        for ln in lines:
+            if not ln:
+                continue
+            k = ln.split("\t", 1)[0]
+            if k in seen:
+                continue
+            seen.add(k)
+            keep.append(ln)
+        if len(keep) != len([l for l in lines if l]):
+            out_f.write_text("\n".join(keep) + "\n", encoding="utf-8")
+            print(f"  removed {len([l for l in lines if l]) - len(keep)} "
+                  f"duplicate row(s) left by an interrupted save")
 
     hits, t0, last_save = [], time.time(), time.time()
     for i in range(start, stop):

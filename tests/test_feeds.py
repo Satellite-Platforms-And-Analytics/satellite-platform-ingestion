@@ -594,3 +594,37 @@ def test_verify_does_not_promote_a_feed_that_yields_no_items(tmp_path):
     assert 'f.verified, f.verified_on = "no", ""' in src[i:j], (
         "the empty-feed branch must clear verified before the promotion "
         "line is reached")
+
+
+def test_an_uncoded_digest_actually_PRINTS_its_items(capsys, monkeypatch):
+    """The bug this test exists for printed "nasa_news (10 new)" and
+    then listed nothing, for four days, because
+
+        show = in_scope if (in_scope or not coded) else []
+
+    evaluates the condition True for an uncoded feed and then returns
+    in_scope, which is []. Every NASA digest was empty.
+
+    test_items_without_a_sic_are_never_filtered_away passed throughout:
+    it tested split_by_sic, which was correct. The caller was wrong.
+    So this test drives cmd_poll and reads what a human would read."""
+    feed = watch.Feed(
+        key="nasa_news", url="https://e.test/f.xml", cap="EVENT",
+        cadence_claimed="unstated", stale_after_hours=168.0, window="",
+        verified="yes", verified_on="2026-10-13",
+        basis="a basis long enough to clear the forty character floor")
+    body = ATOM.replace(
+        "<title>10-K - EXAMPLE CORP</title>",
+        "<title>NASA Science, Cargo Launch on 35th Resupply</title>")
+
+    c = _client_with(_FakeResponse(200, body))
+    monkeypatch.setattr(watch, "load_state",
+                        lambda: {"nasa_news": {"seen": ["old-id"]}})
+    monkeypatch.setattr(watch, "save_state", lambda s: None)
+    c._robots["e.test"] = None
+    watch.cmd_poll([feed], c, include_unverified=False, write=False)
+    out = capsys.readouterr().out
+    assert "1 new" in out
+    assert "NASA Science, Cargo Launch" in out, (
+        "the item was counted and not shown: the digest is hiding its "
+        "own effect")

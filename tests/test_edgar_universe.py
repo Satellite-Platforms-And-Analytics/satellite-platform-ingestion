@@ -297,3 +297,42 @@ def test_restart_sets_the_old_output_aside_rather_than_duplicating(tmp_path):
     assert eu.main(["--bulk-dir", str(bulk), "--restart"]) == 0
     assert len(out.read_text().strip().split("\n")) == 2, "rows doubled"
     assert (tmp_path / "derived" / "space_filers.tsv.superseded").is_file()
+
+
+def test_a_null_inside_the_exchanges_list_does_not_crash(tmp_path):
+    """Crashed the real scan at record ~820,000 on 2026-10-19:
+    "sequence item 0: expected str instance, NoneType found". `or []`
+    guards a missing or null KEY; it does not guard a list that
+    CONTAINS null, and a filer with a ticker and no exchange carries
+    exchanges: [None]."""
+    p = tmp_path / "CIK0000004321.json"
+    p.write_text(json.dumps({
+        "cik": "0000004321", "name": "Listed Nowhere Inc", "sic": "3760",
+        "sicDescription": "d", "tickers": ["ABC", None],
+        "exchanges": [None], "formerNames": [None],
+        "filings": {"recent": {"form": ["10-K"],
+                               "filingDate": ["2026-01-01"]}},
+    }), encoding="utf-8")
+    d = eu.filer_detail(str(p))
+    assert d["exchanges"] == ""
+    assert d["tickers"] == "ABC"
+    assert d["former_names"] == ""
+
+
+def test_an_interrupted_save_does_not_duplicate_rows_on_resume(tmp_path):
+    """The save block writes rows and THEN the checkpoint, so a crash
+    between the two re-finds the same filers and appends them twice."""
+    bulk = tmp_path / "submissions"
+    bulk.mkdir()
+    for i in range(1, 4):
+        _write(bulk, i, "3760", f"Filer {i}")
+    out = tmp_path / "derived" / "space_filers.tsv"
+    assert eu.main(["--bulk-dir", str(bulk), "--limit", "2",
+                    "--restart"]) == 0
+    # simulate the window: rows written, checkpoint not advanced
+    with open(out, "a", encoding="utf-8") as fh:
+        fh.write(out.read_text(encoding="utf-8").splitlines()[1] + "\n")
+    assert eu.main(["--bulk-dir", str(bulk)]) == 0
+    ciks = [l.split("\t")[0] for l in
+            out.read_text(encoding="utf-8").splitlines()[1:] if l]
+    assert len(ciks) == len(set(ciks)), ciks
