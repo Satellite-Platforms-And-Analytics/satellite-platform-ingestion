@@ -186,18 +186,188 @@ def test_sec_edgar_holds_itself_below_the_published_limit() -> None:
     assert MIN_INTERVAL_S >= 0.2, "the stated policy is half the ceiling"
 
 
-def test_one_xbrl_tag_per_metric() -> None:
-    """Falling back across revenue tags would make source='sec_edgar' plus
-    metric='revenue' mean different things per company, and cost_claims
-    has no column recording which tag a row came from. The alternates
-    are listed to be COUNTED, never read."""
-    from src.funding.sec_edgar import ALSO_SEEN, TAG_FOR_METRIC
-    for metric, tag in TAG_FOR_METRIC.items():
-        assert tag not in ALSO_SEEN.get(metric, ()), (
-            f"{metric}: the chosen tag is also in the not-read list")
-    assert "market_cap" not in TAG_FOR_METRIC, (
+def _concept(tag: str, years, name: str = "A FILER INC") -> dict:
+    """A companyconcept payload carrying one FY 10-K fact per year."""
+    return {"entityName": name, "units": {"USD": [
+        {"fp": "FY", "form": "10-K", "start": f"{y}-01-01",
+         "end": f"{y}-12-31", "filed": f"{y + 1}-02-07", "val": 1000 + y}
+        for y in years]}}
+
+
+def test_tag_chain_is_ordered_and_never_a_merge() -> None:
+    """The one-tag-per-metric rule was replaced by an ordered chain on
+    2026-10-19, because the first live --survey showed Lockheed's and
+    Boeing's revenue series ending in 2019: both moved to `Revenues`
+    and a single tag could not follow. --apply would have written
+    $59.8bn as Lockheed's revenue, correctly stamped as_of 2019-12-31,
+    against a real 2025 figure near $74bn. A stale number wearing a
+    valid date is worse than a gap (AD-113, AD-116).
+
+    What a chain must never become is a MERGE. One tag supplies the
+    whole series, so: no tag twice in a chain (re-reading one concept
+    could look like two opinions), no empty chain, and market_cap still
+    absent because EDGAR files shares outstanding and no price."""
+    from src.funding.sec_edgar import TAGS_FOR_METRIC
+    for metric, chain in TAGS_FOR_METRIC.items():
+        assert chain, f"{metric}: an empty chain reads as 'no data' forever"
+        assert len(set(chain)) == len(chain), (
+            f"{metric}: a tag appears twice in the chain: {chain}")
+        assert all(isinstance(t, str) and t for t in chain), chain
+    assert "market_cap" not in TAGS_FOR_METRIC, (
         "EDGAR has shares outstanding and no price; market cap would be "
         "derived, not published")
+
+
+def test_source_url_names_the_concept_that_was_read() -> None:
+    """The objection to a chain was real: source='sec_edgar' plus
+    metric='revenue' would mean different things per filer, and
+    cost_claims has no column saying which tag a row came from. The fix
+    was to stop pointing source_url at a browse-edgar page -- which
+    records nothing -- and point it at the companyconcept URL actually
+    fetched, which CONTAINS the tag.
+
+    So every tag in every chain must survive the round trip
+    tag -> URL -> tag, or a claim could not say where it came from. And
+    a browse-edgar URL must read as "no tag recorded", never as a tag:
+    guessing one would be the same error one layer down (AD-112)."""
+    from src.funding.sec_edgar import (CONCEPT, FILING_URL, TAGS_FOR_METRIC,
+                                       tag_from_url)
+    for metric, chain in TAGS_FOR_METRIC.items():
+        for tag in chain:
+            url = CONCEPT.format(cik=320193, tag=tag)
+            assert tag_from_url(url) == tag, (
+                f"{metric}/{tag}: source_url would not identify its own "
+                f"concept; round trip gave {tag_from_url(url)!r}")
+    assert tag_from_url(FILING_URL.format(cik=936468)) is None, (
+        "a pre-2026-10-19 browse-edgar source_url must read as 'tag not "
+        "recorded'")
+    assert tag_from_url(None) is None and tag_from_url("") is None
+
+
+def test_pick_series_reads_the_preferred_tag_and_stops(monkeypatch) -> None:
+    """A fresh preferred tag must end the walk. Otherwise every filer
+    costs a request per tag in the chain, and a rate limit honoured by
+    halving the published ceiling is undone by quadrupling the calls."""
+    from datetime import date
+    from src.funding import sec_edgar as se
+
+    chain = se.TAGS_FOR_METRIC["revenue"]
+    asked: list = []
+
+    def fake(_c, url, _key, _use_cache=True):
+        asked.append(se.tag_from_url(url))
+        return _concept(se.tag_from_url(url), (2023, 2024, 2025)), False
+
+    monkeypatch.setattr(se, "cached", fake)
+    s = se.pick_series(None, 320193, "revenue", False,
+                       today=date(2026, 10, 19))
+    assert s["tag"] == chain[0]
+    assert asked == [chain[0]], f"read more than it needed: {asked}"
+    assert len(s["facts"]) == 3
+
+
+def test_pick_series_falls_past_a_stale_tag_without_merging(
+        monkeypatch) -> None:
+    """Lockheed's exact shape: the preferred tag carries 2017-2019 and
+    nothing since; `Revenues` carries the recent years. The chain must
+    return Revenues' series ALONE -- three facts, not six -- and name
+    it. A spliced series is one no filer ever reported and no URL could
+    cite, which is the opposite of what source_url is now for."""
+    from datetime import date
+    from src.funding import sec_edgar as se
+
+    preferred, second = se.TAGS_FOR_METRIC["revenue"][:2]
+
+    def fake(_c, url, _key, _use_cache=True):
+        tag = se.tag_from_url(url)
+        if tag == preferred:
+            return _concept(tag, (2017, 2018, 2019)), False
+        if tag == second:
+            return _concept(tag, (2023, 2024, 2025)), False
+        raise RuntimeError(f"HTTP 404 from {url}")
+
+    monkeypatch.setattr(se, "cached", fake)
+    s = se.pick_series(None, 936468, "revenue", False,
+                       today=date(2026, 10, 19))
+    assert s["tag"] == second, s["trail"]
+    assert len(s["facts"]) == 3, "a chain chooses a tag, it does not merge"
+    assert [f["end"] for f in s["facts"]] == [
+        "2023-12-31", "2024-12-31", "2025-12-31"]
+    assert s["stale_days"] <= se.STALE_SERIES_DAYS
+    assert any(preferred in line for line in s["trail"]), (
+        "the trail must show the tag that was passed over, so the "
+        "decision is visible and not only its result")
+
+
+def test_pick_series_keeps_the_preferred_tag_when_every_tag_is_stale(
+        monkeypatch) -> None:
+    """If nothing in the chain is current, the MOST PREFERRED tag that
+    has data wins -- not the newest. An old fact carries its own real
+    as_of_date and is still true; silently switching concepts because
+    one happens to be a year less old would be a choice nobody could
+    see. stale_days is set so the caller can say so out loud."""
+    from datetime import date
+    from src.funding import sec_edgar as se
+
+    preferred, second = se.TAGS_FOR_METRIC["revenue"][:2]
+
+    def fake(_c, url, _key, _use_cache=True):
+        tag = se.tag_from_url(url)
+        if tag == preferred:
+            return _concept(tag, (2017, 2018)), False
+        if tag == second:
+            return _concept(tag, (2019, 2020)), False
+        raise RuntimeError(f"HTTP 404 from {url}")
+
+    monkeypatch.setattr(se, "cached", fake)
+    s = se.pick_series(None, 936468, "revenue", False,
+                       today=date(2026, 10, 19))
+    assert s["tag"] == preferred, s["trail"]
+    assert s["stale_days"] > se.STALE_SERIES_DAYS
+    assert any(str(se.STALE_SERIES_DAYS) in line for line in s["trail"])
+
+
+def test_pick_series_survives_a_404_on_the_preferred_tag(monkeypatch) -> None:
+    """NOC's measured case: `revenue  no companyconcept (HTTP 404)`. A
+    404 on the preferred tag is exactly what a chain is for, so it must
+    be a trail line and the next tag must be tried -- not an exception
+    that loses the filer, and not an empty result reported as 'no
+    data' (AD-113)."""
+    from datetime import date
+    from src.funding import sec_edgar as se
+
+    preferred, second = se.TAGS_FOR_METRIC["revenue"][:2]
+
+    def fake(_c, url, _key, _use_cache=True):
+        tag = se.tag_from_url(url)
+        if tag == second:
+            return _concept(tag, (2024, 2025)), False
+        raise RuntimeError(f"HTTP 404 from {url}")
+
+    monkeypatch.setattr(se, "cached", fake)
+    s = se.pick_series(None, 1133421, "revenue", False,
+                       today=date(2026, 10, 19))
+    assert s["tag"] == second
+    assert any("404" in line and preferred in line for line in s["trail"]), (
+        f"the 404 must be readable in full, with its URL: {s['trail']}")
+    assert any(url_part in " ".join(s["trail"])
+               for url_part in ("data.sec.gov",)), (
+        "a truncated error message is one you have to reproduce to read")
+
+
+def test_pick_series_returns_nothing_rather_than_guessing(monkeypatch) -> None:
+    """Every tag 404s. The answer is "no series", with the trail saying
+    so for each tag -- not a tag with an empty list, which a caller
+    could write as a provenance URL for facts it never read."""
+    from src.funding import sec_edgar as se
+
+    def fake(_c, url, _key, _use_cache=True):
+        raise RuntimeError(f"HTTP 404 from {url}")
+
+    monkeypatch.setattr(se, "cached", fake)
+    s = se.pick_series(None, 1, "rd_spend", False)
+    assert s["tag"] is None and s["facts"] == []
+    assert len(s["trail"]) == len(se.TAGS_FOR_METRIC["rd_spend"])
 
 
 def test_space_sic_codes_exist_in_the_secs_own_list() -> None:
