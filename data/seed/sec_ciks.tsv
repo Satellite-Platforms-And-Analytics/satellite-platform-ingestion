@@ -52,22 +52,22 @@
 # ever catch the few that sit in communications or navigation.
 #
 ticker	org_code	decision	basis
-LMT	-	pending	Lockheed Martin. SIC expected 3760/3761. organizations has LM; confirm against the survey before matching.
-NOC	-	pending	Northrop Grumman. GCAT models the business units and may have no parent row - 10-12 found exactly that. Expect `claim` rather than `match`.
-BA	-	pending	Boeing. organizations has BOE (Boeing Co.), the parent, as of the 10-12 re-match. Confirm.
-RTX	-	pending	RTX (Raytheon). organizations has RAYTH = "Raytheon Space and Information Systems", a BUSINESS UNIT. A filer's revenue is the enterprise's; coding it to a unit would be AD-101's defect. Expect `claim`.
-LHX	-	pending	L3Harris. Confirm presence in organizations.
-RKLB	-	pending	Rocket Lab. A pure-play launch operator, so GCAT very likely has it.
-ASTS	-	pending	AST SpaceMobile. Direct-to-cell constellation operator, so GCAT plausibly has a row; a heavy R&D filer, which is the metric this source is best at.
-PL	-	pending	Planet Labs. An imagery operator with a large fleet, so GCAT almost certainly has it. Watch the fiscal year: Planet's FY ends in January, so FY labels lag the calendar.
-SPIR	-	pending	Spire Global. Smallsat operator; also restated financials in 2024, which makes it the useful test of whether a later filing supersedes an earlier one on the same period end.
-BKSY	-	pending	BlackSky. Imagery operator. Small revenue base, so a quarterly fact mistaken for an annual one would be glaring rather than subtle - a good canary for the fp=FY filter.
-MNTS	-	pending	Momentus. May have delisted; the survey will say.
-RDW	-	pending	Redwire. Space infrastructure manufacturer rather than an operator, so GCAT may have no row at all; expect 'claim' rather than 'match'.
-LUNR	-	pending	Intuitive Machines. Lander developer, NASA CLPS contractor - so it should also appear in the USAspending claims, which makes it a candidate for a cross-source comparison.
-VSAT	-	pending	Viasat. Satellite communications operator, and large enough that its revenue dwarfs the pure-plays; useful for checking the resolver does not mix scales within one metric.
-IRDM	-	pending	Iridium. Constellation operator with a long filing history, so it should give the deepest annual series of any filer in this seed.
-GSAT	-	pending	Globalstar. organizations has GLOB, which won its collision on name_native. Confirm.
+LMT	-	claim	EDGAR confirms CIK 936468, SIC 3760, 11 10-Ks (full-universe scan 2026-10-19). organizations has LM as a candidate; confirm by match, not by name. The old basis said "SIC expected 3760/3761" - there is no 3761 (AD-112), and EDGAR's own answer is above.
+NOC	-	claim	EDGAR confirms CIK 1133421, SIC 3812, 9 10-Ks (full-universe scan 2026-10-19). GCAT models the business units and may have no parent row - the 10-12 re-match found exactly that, which is why this is a claim and not a match.
+BA	-	claim	EDGAR confirms CIK 12927, SIC 3721, 7 10-Ks (full-universe scan 2026-10-19). organizations has BOE (Boeing Co.), the parent, as of the 10-12 re-match. Confirm by match.
+RTX	-	claim	EDGAR confirms CIK 101829, SIC 3724, 10 10-Ks (full-universe scan 2026-10-19). organizations has RAYTH = "Raytheon Space and Information Systems", a BUSINESS UNIT. A filer's revenue is the enterprise's; coding it to a unit would be AD-101's defect. Claim, deliberately.
+LHX	-	claim	EDGAR confirms CIK 202058, SIC 3812, 9 10-Ks (full-universe scan 2026-10-19). Presence in organizations still unconfirmed; claim until a match says otherwise.
+RKLB	-	claim	EDGAR confirms CIK 1819994, SIC 3760, 8 10-Ks (full-universe scan 2026-10-19). A pure-play launch operator, so GCAT very likely has it.
+ASTS	-	claim	EDGAR confirms CIK 1780312, SIC 4899, 10 10-Ks (full-universe scan 2026-10-19). Direct-to-cell constellation operator. A heavy R&D filer, which is the metric this source is best at.
+PL	-	claim	EDGAR confirms CIK 1836833, SIC 3663, 6 10-Ks (full-universe scan 2026-10-19). Watch the fiscal year: Planet's FY ends in January, so FY labels lag the calendar.
+SPIR	-	claim	EDGAR confirms CIK 1816017, SIC 4899, 10 10-Ks (full-universe scan 2026-10-19). Restated financials in 2024, which makes it the useful test of whether a later filing supersedes an earlier one on the same period end.
+BKSY	-	claim	EDGAR confirms CIK 1753539, SIC 3663, 14 10-Ks (full-universe scan 2026-10-19). Small revenue base, so a quarterly fact mistaken for an annual one would be glaring rather than subtle - a good canary for the fp=FY filter.
+MNTS	-	claim	EDGAR confirms CIK 1781162, SIC 3760, 10 10-Ks (full-universe scan 2026-10-19). May have delisted; the scan still finds 10 10-Ks, so the filing history is there regardless.
+RDW	-	claim	EDGAR confirms CIK 1819810, SIC 3760, 7 10-Ks (full-universe scan 2026-10-19). Space infrastructure manufacturer rather than an operator, so GCAT may have no row at all - claim, not match.
+LUNR	-	claim	EDGAR confirms CIK 1844452, SIC 3812, 5 10-Ks (full-universe scan 2026-10-19). NASA CLPS contractor, so it should also appear in the USAspending claims, which makes it a candidate for a cross-source comparison.
+VSAT	-	claim	EDGAR confirms CIK 797721, SIC 4899, 9 10-Ks (full-universe scan 2026-10-19). Large enough that its revenue dwarfs the pure-plays; useful for checking the resolver does not mix scales within one metric.
+IRDM	-	claim	EDGAR confirms CIK 1418819, SIC 4899, 10 10-Ks (full-universe scan 2026-10-19). Constellation operator with a long filing history, so it should give the deepest annual series of any filer in this seed.
+GSAT	-	claim	EDGAR confirms CIK 1366868, SIC 4899, 20 10-Ks (full-universe scan 2026-10-19). organizations has GLOB, which won its collision on name_native. Confirm by match.
 # ── Deliberately absent, with the reason ──
 # SPACEX    not a filer. Private, no 10-K, nothing in EDGAR to read.
 # ULA       not a filer, and org_aliases.tsv already refuses the name:
