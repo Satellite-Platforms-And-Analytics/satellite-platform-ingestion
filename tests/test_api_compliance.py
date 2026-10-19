@@ -194,6 +194,17 @@ def _concept(tag: str, years, name: str = "A FILER INC") -> dict:
         for y in years]}}
 
 
+def test_the_error_scrubber_has_exactly_one_definition() -> None:
+    """check_write_block.py needed the same scrubber sec_edgar had, and
+    copying it would be AD-112: two definitions of what counts as safe
+    to print, drifting apart until one of them leaks. It lives in
+    src.db.writer and sec_edgar ALIASES it -- same object, so this
+    assertion means something."""
+    from src.db.writer import brief_db_error
+    from src.funding.sec_edgar import _db_message
+    assert _db_message is brief_db_error
+
+
 def test_a_connection_error_never_carries_a_credential() -> None:
     """A connection failure is the one place a connection string can
     turn up in a message, and nothing in this project prints a

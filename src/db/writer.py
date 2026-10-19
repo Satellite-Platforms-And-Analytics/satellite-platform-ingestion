@@ -71,6 +71,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from contextlib import contextmanager
@@ -94,6 +95,31 @@ _ENGINE: Optional[Engine] = None
 # =====================================================
 # ENGINE / CONNECTION
 # =====================================================
+
+def brief_db_error(exc: BaseException) -> str:
+    """The driver's own words about a failed connection or statement,
+    on one line, with no credential in them.
+
+    LIVES HERE because more than one caller needs it and a second copy
+    is AD-112 with the serial numbers filed off. `src.funding.sec_edgar`
+    aliases it; `check_write_block.py` imports it.
+
+    The interesting half of a database failure is the DBAPI message
+    underneath SQLAlchemy's wrapper -- "server didn't return client
+    encoding" means something quite different from "password
+    authentication failed", and `check_db_endpoints.py` is the tool that
+    tells those apart. So surface it rather than a traceback.
+
+    AND SCRUB IT. Nothing in this project prints a credential, and a
+    connection error is the one place a connection string can turn up
+    in a message. A `scheme://user:pass@host` anywhere in the text is
+    replaced wholesale rather than partially masked, because a
+    half-masked secret is still a secret someone has to reason about.
+    """
+    msg = " ".join(str(getattr(exc, "orig", None) or exc).split())
+    msg = re.sub(r"\w+://\S+", "<connection string redacted>", msg)
+    return msg[:300]
+
 
 def get_engine() -> Engine:
     """

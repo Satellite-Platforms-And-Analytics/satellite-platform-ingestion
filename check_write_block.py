@@ -53,18 +53,19 @@ bootstrap()
 
 from sqlalchemy import text                                  # noqa: E402
 
-from src.db.writer import get_engine                         # noqa: E402
+from src.db.writer import brief_db_error, get_engine         # noqa: E402
 
 SETTINGS = ("statement_timeout", "lock_timeout",
             "idle_in_transaction_session_timeout",
             "default_transaction_read_only")
 
 
-def endpoint() -> None:
+def endpoint() -> "int | None":
+    """-> the configured port, or None. Prints no credential."""
     url = os.environ.get("DATABASE_URL") or ""
     if not url:
         print("  DATABASE_URL is not set.")
-        return
+        return None
     u = urlsplit(url)
     kind = {6543: "TRANSACTION pooler", 5432: "session pooler or direct"}
     print(f"  configured endpoint: {u.hostname}:{u.port}  "
@@ -74,13 +75,38 @@ def endpoint() -> None:
         print("    6543 hands out a different backend per statement. "
               "check_db_endpoints.py\n    reported this port FAILING "
               "earlier today while 5432 answered.")
+    return u.port
 
 
 def main() -> int:
     print("\n  ENDPOINT")
-    endpoint()
+    port = endpoint()
 
-    with get_engine().connect() as conn:
+    # THIS SCRIPT COMMITTED THE FAILURE IT WAS WRITTEN TO REPORT.
+    # The first version went straight into get_engine().connect() and
+    # produced a 60-line traceback -- the exact thing AD-123 had just
+    # been written about, one file later (AD-105's shape: the tool that
+    # does what it was built to catch). A diagnostic that cannot
+    # diagnose its own connection is not a diagnostic.
+    try:
+        conn_ctx = get_engine().connect()
+    except Exception as exc:                                 # noqa: BLE001
+        print("\n  COULD NOT CONNECT, so none of the questions below "
+              "could be asked.")
+        print(f"    driver: {brief_db_error(exc)}")
+        if port == 6543:
+            print("    AND THE CONFIGURED PORT IS THE ONE THAT HAS "
+                  "FAILED EVERY PROBE TODAY.\n    Nothing here can be "
+                  "measured until DATABASE_URL points at 5432. That is "
+                  "the\n    whole finding: change the port, then re-run "
+                  "this.")
+        else:
+            print("    Run `python check_db_endpoints.py`: it tries both "
+                  "pooler ports and the\n    direct host with the same "
+                  "credential and reports which complete a handshake.")
+        return 1
+
+    with conn_ctx as conn:
         print("\n  WHAT IS IN cost_claims NOW (so 'nothing was written' is "
               "measured, not assumed)")
         if conn.execute(text(

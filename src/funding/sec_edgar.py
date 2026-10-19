@@ -168,7 +168,7 @@ bootstrap()
 from sqlalchemy import text                                  # noqa: E402
 from sqlalchemy.exc import SQLAlchemyError                   # noqa: E402
 
-from src.db.writer import get_engine                         # noqa: E402
+from src.db.writer import brief_db_error, get_engine         # noqa: E402
 from src.useragent import user_agent                         # noqa: E402
 
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -847,24 +847,11 @@ RETURNING (xmax = 0) AS inserted
 """
 
 
-def _db_message(exc: BaseException) -> str:
-    """The driver's own words, on one line, with no credential in them.
-
-    The interesting half of a connection failure is the DBAPI message
-    underneath SQLAlchemy's wrapper -- "server didn't return client
-    encoding" means something quite different from "password
-    authentication failed", and `check_db_endpoints.py` is the tool that
-    tells those apart. So surface it rather than a traceback.
-
-    AND SCRUB IT. Nothing in this project prints a credential, and a
-    connection error is the one place a connection string can turn up in
-    a message. A `scheme://user:pass@host` anywhere in the text is
-    replaced wholesale rather than partially masked, because a
-    half-masked secret is still a secret someone has to reason about.
-    """
-    msg = " ".join(str(getattr(exc, "orig", None) or exc).split())
-    msg = re.sub(r"\w+://\S+", "<connection string redacted>", msg)
-    return msg[:300]
+#: The scrubbed one-line driver message. DEFINED IN src.db.writer so
+#: that check_write_block.py and this module cannot drift apart on what
+#: counts as safe to print. Aliased rather than wrapped, so the test
+#: that asserts they are the same object actually means something.
+_db_message = brief_db_error
 
 
 def _report_db_unreachable(exc: BaseException, dry_run: bool) -> None:
