@@ -474,6 +474,17 @@ def annual_facts(payload: dict,
     filing carrying THAT value for that period. If a restatement changed
     the number, the first filing to say the new number is the
     restatement, which is also right.
+
+    AND IT IS PER TAG, WHICH LOOKS WRONG AND IS NOT. Lockheed's 2016
+    revenue carries `published_date 2019-02-08`, nearly two years after
+    the period. Correct: its `Revenues` series begins in 2016 because
+    the FY2018 10-K is the first filing to state 2016 revenue UNDER
+    THAT CONCEPT -- before it they tagged revenue differently. So
+    `first_said` means "the earliest filing to state this value for
+    this period under this tag", which is exactly as precise as
+    `source_url` naming the tag makes it. Anyone computing "how fast
+    does this filer report" from these rows must read source_url with
+    them.
     """
     why: Counter = Counter()
     units = payload.get("units")
@@ -935,6 +946,47 @@ def apply(c: Client, use_cache: bool, dry_run: bool) -> int:
             return 1
 
     ciks = resolve_tickers(c, [t for t, _o, _d_ in live], use_cache)
+
+    # A dry run executes nothing, so it opens no connection -- which is
+    # also what lets it rehearse the EDGAR side with the database down.
+    #
+    # The whole write is ONE transaction, so a failure anywhere in it
+    # leaves nothing behind. That is the right trade for 295 rows -- a
+    # half-written money table is worse than an unwritten one -- but it
+    # means a failure on row 1 and a failure on row 294 cost the same,
+    # and neither should arrive as a traceback (AD-123).
+    try:
+        return _write(c, conn_ctx(dry_run), live, ciks, use_cache, dry_run)
+    except (SQLAlchemyError, OSError) as exc:
+        print("\n  THE WRITE FAILED AND ROLLED BACK.")
+        print(f"    driver: {_db_message(exc)}")
+        print("    Nothing was written: the whole run is one "
+              "transaction, so 0 of the rows\n    landed, not some of "
+              "them. Re-running is safe -- the ON CONFLICT key makes "
+              "it\n    idempotent.")
+        print("    `python check_write_block.py` is the tool for this "
+              "one: it reports what\n    cost_claims holds now, the "
+              "timeouts this role runs under, anything sitting\n    "
+              "idle in a transaction holding locks, and one timed "
+              "insert that it rolls back.")
+        return 1
+
+
+def conn_ctx(dry_run: bool):
+    """The transaction to write in, or nothing at all for a dry run.
+
+    Built by the caller inside its try, so a connection that fails to
+    open is reported the same way as one that fails mid-write.
+    """
+    return (contextlib.nullcontext(None) if dry_run
+            else get_engine().begin())
+
+
+def _write(c: Client, ctx, live: list, ciks: dict, use_cache: bool,
+           dry_run: bool) -> int:
+    """Fetch each filer's series and write it. Separated from apply() so
+    that apply() can wrap the whole write in one except clause without
+    wrapping the seed checks and the survey-reading refusals too."""
     inserted = updated = 0
     #: (headline, trail) per filer/metric pair, so the count means pairs
     #: and the detail stays whole. A truncated diagnostic is one you
@@ -948,11 +1000,7 @@ def apply(c: Client, use_cache: bool, dry_run: bool) -> int:
     #: Facts newer than what we wrote, refused because the filer's own
     #: dates do not describe a year. L3Harris's FY2025 revenue is one.
     near: list = []
-
-    # A dry run executes nothing, so it opens no connection -- which is
-    # also what lets it rehearse the EDGAR side with the database down.
-    with (contextlib.nullcontext(None) if dry_run
-          else get_engine().begin()) as conn:
+    with ctx as conn:
         for tk, org_code, decision in live:
             cik = ciks.get(tk)
             if not cik:
