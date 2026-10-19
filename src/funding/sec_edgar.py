@@ -429,8 +429,9 @@ def _d(v) -> "date | None":
         return None
 
 
-def annual_facts(payload: dict, tag: str) -> "tuple[list, Counter]":
-    """Annual USD facts for one tag, plus why each rejection happened.
+def annual_facts(payload: dict,
+                 tag: str) -> "tuple[list, Counter, list]":
+    """Annual USD facts for one tag -> (kept, why, near_misses).
 
     Accepts either shape: a `companyconcept` payload, where `units` is
     at the top level, or a `companyfacts` payload, where it is buried
@@ -441,6 +442,36 @@ def annual_facts(payload: dict, tag: str) -> "tuple[list, Counter]":
     See "WHICH ENDPOINT" in the module docstring: a frame picks the fact
     that "most closely fits" a calendar period, and vintage is part of
     this table's key.
+
+    NEAR MISSES, AND WHY THEY ARE RETURNED (2026-10-19)
+    ---------------------------------------------------
+    The third return value is every fact that declared `fp="FY"` in a
+    10-K and then carried a span too short to be a year. L3Harris is why
+    it exists. Its FY2025 10-K reports **$21,865,000,000 with
+    start=2025-10-04, end=2026-01-02** - a 90-day span on the full-year
+    figure (nine months were $16.2bn, so the value is unmistakably the
+    year). The span rule rejected it, correctly: **a 90-day span cannot
+    be told from a quarter by its dates**, and writing a quarter into an
+    annual series is the error that rule exists to prevent.
+
+    But rejecting it silently left `--survey` reporting L3Harris as a
+    series ending 2025-01-03 and nothing newer, which reads as "this
+    filer has not filed" - and it has. The number is in EDGAR, and it is
+    undatable from its own dates. So the near misses come back, the
+    caller surfaces the ones NEWER than anything kept, and the reader
+    sees the real situation instead of an absence (AD-113).
+
+    `first_said` IS ADDED TO EVERY KEPT FACT. A 10-K restates the two
+    prior years, so the same period's value appears in three filings and
+    the supersede rule keeps the newest - which made `published_date`
+    the date of the most recent filing that REPEATED a number rather
+    than the one that first stated it. L3Harris's FY2024 revenue would
+    have published on 2026-02-12, 405 days after its period end, when it
+    was first stated 2025-02-14. So: the VALUE comes from the latest
+    filing (a restatement must win), and `first_said` is the earliest
+    filing carrying THAT value for that period. If a restatement changed
+    the number, the first filing to say the new number is the
+    restatement, which is also right.
     """
     why: Counter = Counter()
     units = payload.get("units")
@@ -449,12 +480,13 @@ def annual_facts(payload: dict, tag: str) -> "tuple[list, Counter]":
         units = node.get("units", {})
     if not units:
         why["tag absent"] += 1
-        return [], why
+        return [], why, []
     rows = units.get("USD")
     if not rows:
         why[f"no USD unit (has {sorted(units)[:3]})"] += 1
-        return [], why
+        return [], why, []
     keep = []
+    near: list = []
     for f in rows:
         if f.get("fp") != "FY":
             why["not fp=FY"] += 1
@@ -467,23 +499,40 @@ def annual_facts(payload: dict, tag: str) -> "tuple[list, Counter]":
             why["no start/end"] += 1
             continue
         if (end - start).days < 300:
+            # Declared FY, filed in a 10-K, and not a year long. Counted
+            # AND returned: see "NEAR MISSES" in the docstring.
             why[f"span {(end - start).days}d"] += 1
+            if f.get("val") is not None:
+                near.append(f)
             continue
         if f.get("val") is None:
             why["null val"] += 1
             continue
         keep.append(f)
-    # One fact per period end; a restatement filed later supersedes.
-    best: dict = {}
+    # One fact per period end. The VALUE is the latest filing's, so a
+    # restatement wins; `first_said` is the earliest filing carrying
+    # that same value, so published_date is when the number was stated
+    # rather than when it was last repeated.
+    groups: dict = {}
     for f in keep:
-        end = _d(f["end"])
-        prev = best.get(end)
-        if prev is None or (_d(f.get("filed")) or date.min) > (
-                _d(prev.get("filed")) or date.min):
-            if prev is not None:
-                why["superseded by a later filing"] += 1
-            best[end] = f
-    return [best[k] for k in sorted(best)], why
+        groups.setdefault(_d(f["end"]), []).append(f)
+    out = []
+    for end in sorted(k for k in groups if k):
+        fs = groups[end]
+        chosen = max(fs, key=lambda g: _d(g.get("filed")) or date.min)
+        if len(fs) > 1:
+            why["repeated in a later filing"] += len(fs) - 1
+            if any(g.get("val") != chosen.get("val") for g in fs):
+                # A number that changed between filings is a vintage
+                # event, not noise. Named separately from a repeat.
+                why["restated with a DIFFERENT value"] += 1
+        said = [_d(g.get("filed")) for g in fs
+                if g.get("val") == chosen.get("val") and _d(g.get("filed"))]
+        c = dict(chosen)
+        c["first_said"] = (min(said).isoformat() if said
+                           else chosen.get("filed"))
+        out.append(c)
+    return out, why, near
 
 
 def tag_from_url(url: str) -> "str | None":
@@ -535,7 +584,7 @@ def pick_series(c: Client, cik: int, metric: str, use_cache: bool,
         except RuntimeError as exc:
             trail.append(f"{tag}: not fetched -- {exc}")
             continue
-        keep, why = annual_facts(cc, tag)
+        keep, why, near = annual_facts(cc, tag)
         if not keep:
             trail.append(f"{tag}: no usable annual fact"
                          + (f" (rejected {dict(why)})" if why else ""))
@@ -544,7 +593,12 @@ def pick_series(c: Client, cik: int, metric: str, use_cache: bool,
         stale_days = (today - end).days if end else None
         found = {"tag": tag, "facts": keep, "why": why,
                  "entity_name": cc.get("entityName"),
-                 "stale_days": stale_days, "trail": trail}
+                 "stale_days": stale_days, "trail": trail,
+                 # FY/10-K facts NEWER than the series we kept, whose
+                 # span is not a year. L3Harris's FY2025 revenue is one.
+                 "newer_near": [f for f in near
+                                if (_d(f.get("end")) or date.min)
+                                > (end or date.min)]}
         if stale_days is not None and stale_days <= STALE_SERIES_DAYS:
             trail.append(f"{tag}: {len(keep)} annual, newest {keep[-1]['end']}"
                          f" ({stale_days}d old) -- USED")
@@ -560,7 +614,7 @@ def pick_series(c: Client, cik: int, metric: str, use_cache: bool,
                      f"tag that has any data at all")
         return fallback
     return {"tag": None, "facts": [], "why": Counter(), "entity_name": None,
-            "stale_days": None, "trail": trail}
+            "stale_days": None, "trail": trail, "newer_near": []}
 
 
 def resolve_tickers(c: Client, wanted: list, use_cache: bool) -> dict:
@@ -671,6 +725,7 @@ def survey(c: Client, use_cache: bool, limit: int) -> int:
     shown = 0
     lags: list = []
     stale_here: list = []
+    near_here: list = []
     for tk, _code, decision, _b in seed:
         cik = ciks.get(tk)
         if not cik or decision not in INGESTABLE or shown >= limit:
@@ -694,20 +749,52 @@ def survey(c: Client, use_cache: bool, limit: int) -> int:
                   f"{CONCEPT.format(cik=cik, tag=s['tag'])}")
             if s["why"]:
                 print(f"        rejected: {dict(s['why'])}")
+            for f in s["newer_near"]:
+                span = (_d(f["end"]) - _d(f["start"])).days
+                print(f"        NEWER FACT NOT WRITTEN: {f['end']} "
+                      f"${f['val']:,.0f}, declared fp=FY in a "
+                      f"{f['form']},")
+                print(f"          but its start is {f['start']} -- a "
+                      f"{span}-day span. A {span}-day span cannot be "
+                      f"told")
+                print(f"          from a quarter by its dates, so it is "
+                      f"refused. The number is in EDGAR;")
+                print(f"          its period is not. (The SEC's own "
+                      f"frame reads these dates the same way,")
+                print(f"          which is why this filer can be absent "
+                      f"from the CY frame above.)")
+                near_here.append(f"{tk}/{metric} {f['end']} "
+                                 f"${f['val']:,.0f} span {span}d")
             if (s["stale_days"] or 0) > STALE_SERIES_DAYS:
                 stale_here.append(f"{tk}/{metric} ({s['stale_days']}d)")
-            lags.append((_d(hi['filed']) - _d(hi['end'])).days)
+            first = _d(hi.get("first_said")) or _d(hi["filed"])
+            lags.append((first - _d(hi['end'])).days)
     if lags:
         print(f"\n    AD-107, measured ONCE rather than printed per row: "
-              f"across the {len(lags)}\n    series above a 10-K was filed "
-              f"{min(lags)}-{max(lags)} days after the period end it "
-              f"reports.\n    as_of_date is that period end, "
-              f"published_date is the filing date, and\n    EDGAR is the "
-              f"first source where the two genuinely differ.")
+              f"across the {len(lags)} series\n    above, the filing that "
+              f"FIRST stated each newest value came "
+              f"{min(lags)}-{max(lags)} days\n    after the period end "
+              f"that value is about. as_of_date is that period end,\n"
+              f"    published_date is the first filing to say it, and "
+              f"EDGAR is the first\n    source where the two genuinely "
+              f"differ.")
+        print(f"    Measured against first_said, NOT the latest filing "
+              f"that repeated the\n    number: a 10-K restates two prior "
+              f"years, so the newest filing carrying a\n    value is "
+              f"routinely a year or two after the value was published.")
     else:
         print("\n    No series was found, so NO as_of/published lag was "
               "measured. The\n    AD-107 claim is untested by this run "
               "rather than confirmed (AD-116).")
+    if near_here:
+        print(f"\n    NEWER FACTS REFUSED FOR THEIR OWN DATES "
+              f"({len(near_here)}):")
+        for line in near_here:
+            print(f"      {line}")
+        print("    These are the filer's labelling, not ours. Claiming "
+              "them would need\n    method='inferred' and a "
+              "derivation_basis naming how the period was\n    "
+              "established - deliberately not done here.")
     if stale_here:
         print(f"\n    STALE EVEN AFTER THE CHAIN: {', '.join(stale_here)}")
         print("    No tag in the chain had anything newer, so --apply "
@@ -791,6 +878,9 @@ def apply(c: Client, use_cache: bool, dry_run: bool) -> int:
     #: this is the line that stops it being silent.
     used: Counter = Counter()
     stale: list = []
+    #: Facts newer than what we wrote, refused because the filer's own
+    #: dates do not describe a year. L3Harris's FY2025 revenue is one.
+    near: list = []
 
     with get_engine().begin() as conn:
         for tk, org_code, decision in live:
@@ -812,6 +902,13 @@ def apply(c: Client, use_cache: bool, dry_run: bool) -> int:
                         list(s["trail"])))
                     continue
                 used[(metric, s["tag"])] += 1
+                for nf in s["newer_near"]:
+                    span = (_d(nf["end"]) - _d(nf["start"])).days
+                    near.append(
+                        f"{tk}/{metric}: {nf['end']} ${nf['val']:,.0f} is "
+                        f"NEWER than anything written, declared fp=FY in a "
+                        f"{nf['form']}, span {span}d. Refused: a {span}-day "
+                        f"span is not an annual period by its own dates")
                 # The URL ACTUALLY READ, which names the concept. See
                 # the module docstring: this is what makes a chain
                 # honest rather than silently heterogeneous.
@@ -833,7 +930,11 @@ def apply(c: Client, use_cache: bool, dry_run: bool) -> int:
                         "metric": metric,
                         "value": float(f["val"]),
                         "as_of_date": _d(f["end"]),
-                        "published_date": _d(f["filed"]) or _d(f["end"]),
+                        # When the number was FIRST stated, not when it
+                        # was last repeated. See annual_facts().
+                        "published_date": (_d(f.get("first_said"))
+                                           or _d(f["filed"])
+                                           or _d(f["end"])),
                         "source_url": src,
                         "organization_code": code,
                     }).scalar_one()
@@ -860,6 +961,12 @@ def apply(c: Client, use_cache: bool, dry_run: bool) -> int:
               f"real as_of_date,\n                      which is correct, "
               f"but no chain tag had anything newer:")
         for line in stale:
+            print(f"      {line}")
+    if near:
+        print(f"  newer, refused    : {len(near)} fact(s) newer than what "
+              f"was written, whose own\n                      dates do "
+              f"not describe an annual period:")
+        for line in near:
             print(f"      {line}")
     if skipped:
         print(f"  skipped           : {len(skipped)} filer/metric pair(s), "

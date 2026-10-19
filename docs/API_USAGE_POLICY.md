@@ -410,6 +410,28 @@ vintage to a fitting rule we do not control, and `as_of_date` is part of
 error nearly stamped a 2026 total with a 1993 date. Period assignment
 stays ours, stated in `annual_facts()`.
 
+**And a frame's absence is not a filing's absence.** Measured on
+2026-10-19: L3Harris is missing from the CY2025 revenue frame, and it
+has filed. Its FY2025 10-K reports **$21,865,000,000 with
+`start=2025-10-04`, `end=2026-01-02`** - `fp="FY"`, form `10-K`, and a
+**90-day span** on the full-year figure (nine months were $16.2bn). The
+SEC's own frame logic reads those dates as we do and files the fact
+under `CY2025Q4`, so the annual frame has no L3Harris row. The error is
+the filer's; it propagates into the SEC's aggregation and would
+propagate into ours. `annual_facts()` refuses the fact - a 90-day span
+cannot be told from a quarter by its dates - and **returns it**, so
+`--survey` and `--apply` report a number that exists and cannot be
+dated rather than a filer that looks silent.
+
+**`published_date` is when a number was first stated, not when it was
+last repeated.** A 10-K restates its two prior years, so one period's
+value appears in three filings. Taking the latest filing's date - which
+the supersede rule implies - put **235 of 324** measured rows up to
+**918 days** late, L3Harris's FY2024 revenue among them at 405 days
+instead of 42. The value still comes from the newest filing, because a
+restatement must win; `first_said` is the earliest filing carrying that
+value, and that is what `published_date` records.
+
 ### SIC codes come from the SEC's own list, and ours were wrong
 
 EDGAR assigns every filer a code from the Division of Corporation

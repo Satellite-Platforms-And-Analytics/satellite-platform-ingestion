@@ -194,6 +194,95 @@ def _concept(tag: str, years, name: str = "A FILER INC") -> dict:
         for y in years]}}
 
 
+def test_a_full_year_mislabelled_as_a_quarter_is_refused_and_reported():
+    """L3Harris's FY2025 10-K, exactly as EDGAR serves it: revenue of
+    $21,865,000,000 with start=2025-10-04, end=2026-01-02 -- fp="FY",
+    form 10-K, and a **90-day span**. Nine months of FY2025 were
+    $16.2bn, so the value is unmistakably the full year; its own dates
+    say quarter. The SEC's frame machinery reads those dates the same
+    way and files the fact under CY2025Q4, which is why the filer is
+    absent from the CY2025 annual frame.
+
+    Both halves of the handling are asserted, because each alone is a
+    failure this project has already made. It must NOT be kept: a
+    90-day span cannot be told from a quarter by its dates, and a
+    quarter sitting in an annual series is a number four times too
+    small with nothing to mark it. And it must NOT vanish: refusing it
+    silently leaves --survey showing a series that stops in January
+    2025 and nothing newer, which reads as "this filer has not filed"
+    while the number sits in EDGAR (AD-113)."""
+    from src.funding.sec_edgar import annual_facts
+    payload = {"units": {"USD": [
+        {"fp": "FY", "form": "10-K", "start": "2023-12-30",
+         "end": "2025-01-03", "filed": "2025-02-14",
+         "val": 21_325_000_000},
+        {"fp": "FY", "form": "10-K", "start": "2025-10-04",
+         "end": "2026-01-02", "filed": "2026-02-12",
+         "val": 21_865_000_000},
+    ]}}
+    keep, why, near = annual_facts(payload, "AnyRevenueTag")
+    assert [f["end"] for f in keep] == ["2025-01-03"], (
+        "a 90-day span must not enter an annual series")
+    assert why["span 90d"] == 1
+    assert len(near) == 1, near
+    assert near[0]["val"] == 21_865_000_000, (
+        "the refused fact must come back, or the caller cannot tell a "
+        "filer who has not filed from one whose dates are wrong")
+
+
+def test_published_date_is_when_a_number_was_first_said() -> None:
+    """A 10-K restates its two prior years, so one period's value
+    appears in three filings and the supersede rule keeps the newest.
+    That made published_date the date of the most recent filing to
+    REPEAT a number rather than the one that stated it: L3Harris's
+    FY2024 revenue would have published 2026-02-12, **405 days** after
+    its period end, when it was first stated 2025-02-14. Across
+    sixteen filers with ten to nineteen years of history that is not an
+    outlier, it is most of the rows.
+
+    The value still comes from the latest filing, because a restatement
+    must win. first_said is the earliest filing carrying THAT value."""
+    from src.funding.sec_edgar import annual_facts
+    same = 21_325_000_000
+    payload = {"units": {"USD": [
+        {"fp": "FY", "form": "10-K", "start": "2023-12-30",
+         "end": "2025-01-03", "filed": f, "val": same}
+        for f in ("2026-02-12", "2025-02-14", "2027-02-10")]}}
+    keep, why, _near = annual_facts(payload, "AnyRevenueTag")
+    assert len(keep) == 1
+    assert keep[0]["filed"] == "2027-02-10", "the value is the newest"
+    assert keep[0]["first_said"] == "2025-02-14", (
+        "published_date must be when the number was said, not when it "
+        "was last repeated")
+    assert why["repeated in a later filing"] == 2, (
+        "the old counter only incremented when a NEWER fact displaced "
+        "one already seen, so a payload in newest-first order counted "
+        "none of them")
+    assert "restated with a DIFFERENT value" not in why
+
+
+def test_a_restated_value_publishes_on_the_filing_that_changed_it():
+    """When a later filing changes the number, the earliest filing to
+    say THAT number is the restatement itself. The original was a
+    different claim about the same period -- which is a vintage event
+    worth naming, not noise -- and the value kept was first said when
+    the restatement said it."""
+    from src.funding.sec_edgar import annual_facts
+    payload = {"units": {"USD": [
+        {"fp": "FY", "form": "10-K", "start": "2024-01-01",
+         "end": "2024-12-31", "filed": "2025-02-01", "val": 100},
+        {"fp": "FY", "form": "10-K", "start": "2024-01-01",
+         "end": "2024-12-31", "filed": "2026-02-01", "val": 110},
+    ]}}
+    keep, why, _near = annual_facts(payload, "AnyRevenueTag")
+    assert keep[0]["val"] == 110, "a restatement wins the value"
+    assert keep[0]["first_said"] == "2026-02-01", (
+        "the restated number was first said by the restatement")
+    assert why["restated with a DIFFERENT value"] == 1, (
+        "a number that changed between filings is a vintage event and "
+        "is named separately from a repeat")
+
+
 def test_an_http_error_keeps_the_url_and_drops_the_boilerplate() -> None:
     """Both directions of this were wrong inside one day. str(exc)[:50]
     cut a 404 off at `.../api/xbrl/compan`: the problem named and the
