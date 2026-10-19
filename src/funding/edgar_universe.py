@@ -70,7 +70,6 @@ import re
 import sys
 import time
 from collections import Counter
-from datetime import date
 
 _root = str(pathlib.Path(__file__).resolve().parents[2])
 if _root not in sys.path:
@@ -316,7 +315,22 @@ def main(argv: "list[str]|None" = None) -> int:
         else bulk / "derived")
     derived.mkdir(parents=True, exist_ok=True)
     state_f = derived / "scan_state.json"
-    out_f = derived / f"space_filers_{date.today().isoformat()}.tsv"
+    #: ONE file per derived/ directory, because there is one index and
+    #: one checkpoint per derived/ directory and the output belongs to
+    #: the same run they do.
+    #:
+    #: It was `space_filers_{date.today()}.tsv` until 2026-10-19, which
+    #: broke the moment a checkpointed run spanned a date. The real
+    #: scan did: 1,242 in-scope filers from one logical pass ended up
+    #: split across space_filers_2026-10-16.tsv (1,148 rows) and
+    #: space_filers_2026-10-17.tsv (94 rows) - and the 10-16 file had
+    #: NO HEADER, because the header was written only when start == 0
+    #: and a resume never starts at 0. A resumable job whose output
+    #: name depends on the wall clock cannot say which run its rows
+    #: belong to, which is the same defect as the index that could not
+    #: say which directory it came from, found two days earlier in this
+    #: same file.
+    out_f = derived / "space_filers.tsv"
 
     idx = build_index(bulk, derived)
     names = idx.read_text(encoding="utf-8").split("\n")
@@ -336,7 +350,15 @@ def main(argv: "list[str]|None" = None) -> int:
 
     start = state["next"]
     stop = min(total, start + a.limit) if a.limit else total
-    if start == 0:
+    if a.restart and out_f.is_file():
+        # --restart rescans from 0, so the old rows would be duplicated.
+        out_f.replace(out_f.with_suffix(".tsv.superseded"))
+        print(f"  --restart: previous output moved to "
+              f"{out_f.name}.superseded")
+    if not out_f.is_file() or out_f.stat().st_size == 0:
+        # Header on an empty file, NOT on start == 0. A resume creating
+        # a fresh file would otherwise write rows with no header, which
+        # is what happened to space_filers_2026-10-16.tsv.
         out_f.write_text("\t".join(COLUMNS) + "\n", encoding="utf-8")
 
     hits, t0, last_save = [], time.time(), time.time()

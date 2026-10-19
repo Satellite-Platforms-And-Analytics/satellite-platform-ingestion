@@ -993,3 +993,55 @@ every satellite operator filing under 4899 and every payload builder
 under 3663. Neither the broad list nor the narrow one is right by
 itself, which is a decision to make against the real distribution
 once the full scan has run — not before.
+
+### The scan's output name was a bug, and the projection was wrong — 2026-10-19
+
+**One run, three output files, one of them headerless.** The artifact
+was named `space_filers_{date.today()}.tsv`, and the real checkpointed
+run spanned a date: 1,242 in-scope filers from one logical pass ended
+up as `space_filers_2026-10-16.tsv` (1,148 rows, **no header**, because
+the header was written only when `start == 0` and a resume never starts
+at 0) plus `space_filers_2026-10-17.tsv` (94 rows).
+
+**A resumable job whose output name depends on the wall clock cannot
+say which run its rows belong to** — the same defect as the file index
+that could not say which directory it came from, found two days earlier
+in this same file. Now: one `space_filers.tsv` per `derived/`, header
+written when the file is empty rather than when the index is 0, and
+`--restart` moves the old output to `.superseded` instead of
+duplicating into it. The three stray files were merged (1,242 unique
+rows, exactly matching the checkpoint's `found`) and renamed `.merged`;
+the 10-14 fragment from the merged-directory run was set aside as
+`.from-merged-dir` rather than mixed in.
+
+**And the universe is ~1,500, not ~12,000.** The 10-17 estimate
+extrapolated 94 hits from the first 7,628 records — the lowest CIKs,
+which are dense with old operating companies. Across 818,607 records
+the rate is a tenth of that:
+
+| SIC | Found | |
+|---|---|---|
+| 4812 | 319 | Radiotelephone communications |
+| 4899 | 271 | Communications services, NEC |
+| 3663 | 258 | Broadcasting & communications equipment |
+| 3728 | 147 | Aircraft parts & auxiliary equipment |
+| 3812 | 99 | Search, detection, navigation, guidance |
+| 3721 | 78 | Aircraft |
+| **3760** | **28** | **Guided missiles & space vehicles & parts** |
+| 3720 / 3724 | 22 / 20 | Aircraft & parts; aircraft engines |
+
+**Third time this week an extrapolation from an unrepresentative sample
+misled** (AD-110 was the first: a match rate inflated fourteenfold by
+sorting on award size). A rate measured on the front of a sorted list
+is a rate for the front of a sorted list.
+
+**What 3760 actually contains**, of 28, the 9 with listed tickers:
+`LMT`, `RKLB`, `MNTS`, `RDW`, `KTOS`, `VOYG`, `FLY`, `MDA` — and
+`NIMU`, *Non Invasive Monitoring Systems Inc*, which the SEC really has
+filed under guided missiles and space vehicles. One false positive in
+nine, from the SEC's own assignment, is the argument for manual
+promotion in a single line.
+
+Two of those were **not** in the 16 hand-picked tickers: **Firefly
+Aerospace (FLY)** and **Voyager Technologies (VOYG)**. That is
+discovery doing the one thing hand-curation cannot.

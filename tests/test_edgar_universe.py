@@ -120,9 +120,9 @@ def test_the_scan_writes_an_artifact_and_never_the_seed(tmp_path, capsys):
     assert "IN SCOPE     1" in out
     assert "COMPANYFACTS 0" in out
 
-    rows = [l for l in (tmp_path / "derived").glob("space_filers_*.tsv")]
-    assert len(rows) == 1
-    lines = rows[0].read_text(encoding="utf-8").strip().split("\n")
+    out = tmp_path / "derived" / "space_filers.tsv"
+    assert out.is_file()
+    lines = out.read_text(encoding="utf-8").strip().split("\n")
     assert lines[0].split("\t") == eu.COLUMNS
     assert len(lines) == 2 and "In Scope Co" in lines[1]
     if before is not None:
@@ -234,7 +234,7 @@ def test_the_artifact_never_lands_inside_the_extracted_data(tmp_path):
     _write(bulk, 1, "3760", "In Scope Co")
     assert eu.main(["--bulk-dir", str(bulk), "--restart"]) == 0
     assert not (bulk / "derived").exists()
-    assert list((tmp_path / "derived").glob("space_filers_*.tsv"))
+    assert (tmp_path / "derived" / "space_filers.tsv").is_file()
 
 
 def test_the_index_is_rebuilt_when_the_bulk_directory_changes(tmp_path):
@@ -261,3 +261,39 @@ def test_the_index_is_rebuilt_when_the_bulk_directory_changes(tmp_path):
     assert got == ["CIK0000000002.json", "CIK0000000003.json"], got
     assert (derived / "filer_index.source.txt").read_text().strip() == \
         str(b.resolve())
+
+
+def test_a_resumed_run_appends_under_the_header_it_already_wrote(tmp_path):
+    """The 2026-10-19 bug, in one test. The output name came from
+    date.today() and the header was written only when start == 0, so a
+    checkpointed run that spanned a date produced a SECOND file with
+    1,148 rows and NO header. One run, one index, one checkpoint — one
+    output file."""
+    bulk = tmp_path / "submissions"
+    bulk.mkdir()
+    for i in range(1, 6):
+        _write(bulk, i, "3760", f"Filer {i}")
+    out = tmp_path / "derived" / "space_filers.tsv"
+
+    assert eu.main(["--bulk-dir", str(bulk), "--limit", "2",
+                    "--restart"]) == 0
+    first = out.read_text(encoding="utf-8").strip().split("\n")
+    assert first[0].split("\t") == eu.COLUMNS and len(first) == 3
+
+    assert eu.main(["--bulk-dir", str(bulk)]) == 0        # resume
+    after = out.read_text(encoding="utf-8").strip().split("\n")
+    assert after[0].split("\t") == eu.COLUMNS, "header was rewritten"
+    assert len(after) == 6, after
+    assert sum(1 for l in after if l.startswith("cik\t")) == 1
+
+
+def test_restart_sets_the_old_output_aside_rather_than_duplicating(tmp_path):
+    bulk = tmp_path / "submissions"
+    bulk.mkdir()
+    _write(bulk, 1, "3760", "Filer 1")
+    out = tmp_path / "derived" / "space_filers.tsv"
+    assert eu.main(["--bulk-dir", str(bulk), "--restart"]) == 0
+    assert len(out.read_text().strip().split("\n")) == 2
+    assert eu.main(["--bulk-dir", str(bulk), "--restart"]) == 0
+    assert len(out.read_text().strip().split("\n")) == 2, "rows doubled"
+    assert (tmp_path / "derived" / "space_filers.tsv.superseded").is_file()
