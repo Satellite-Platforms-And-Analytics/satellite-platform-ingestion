@@ -151,6 +151,7 @@ two different real dates in it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import pathlib
@@ -165,6 +166,7 @@ from src.env import bootstrap
 bootstrap()
 
 from sqlalchemy import text                                  # noqa: E402
+from sqlalchemy.exc import SQLAlchemyError                   # noqa: E402
 
 from src.db.writer import get_engine                         # noqa: E402
 from src.useragent import user_agent                         # noqa: E402
@@ -834,6 +836,50 @@ RETURNING (xmax = 0) AS inserted
 """
 
 
+def _db_message(exc: BaseException) -> str:
+    """The driver's own words, on one line, with no credential in them.
+
+    The interesting half of a connection failure is the DBAPI message
+    underneath SQLAlchemy's wrapper -- "server didn't return client
+    encoding" means something quite different from "password
+    authentication failed", and `check_db_endpoints.py` is the tool that
+    tells those apart. So surface it rather than a traceback.
+
+    AND SCRUB IT. Nothing in this project prints a credential, and a
+    connection error is the one place a connection string can turn up in
+    a message. A `scheme://user:pass@host` anywhere in the text is
+    replaced wholesale rather than partially masked, because a
+    half-masked secret is still a secret someone has to reason about.
+    """
+    msg = " ".join(str(getattr(exc, "orig", None) or exc).split())
+    msg = re.sub(r"\w+://\S+", "<connection string redacted>", msg)
+    return msg[:300]
+
+
+def _report_db_unreachable(exc: BaseException, dry_run: bool) -> None:
+    """Say the database could not be reached, in words, not a traceback.
+
+    A dry run is the rehearsal, and it is worth having when the database
+    is down: the EDGAR half -- which tag each metric resolves to, what
+    would be written, what is refused -- needs no database at all. So
+    --dry-run continues and SAYS the preconditions went unchecked, which
+    is the AD-116 rule: an unchecked thing is reported as unchecked, not
+    as ok.
+    """
+    print("\n  THE DATABASE DID NOT ANSWER.")
+    print(f"    driver: {_db_message(exc)}")
+    print("    Run `python check_db_endpoints.py`. It tries the same "
+          "credential against the\n    transaction pooler (6543), the "
+          "session pooler (5432) and the direct host, and\n    its "
+          "docstring is where this project records what each driver "
+          "message means.")
+    if dry_run:
+        print("    --dry-run CONTINUES from here. Everything below is the "
+              "EDGAR side only.\n    NOT checked: that cost_claims "
+              "exists, and that every 'match' row names a\n    code "
+              "`organizations` really has.")
+
+
 def apply(c: Client, use_cache: bool, dry_run: bool) -> int:
     seed = read_seed()
     pending = [t for t, _o, d_, _b in seed if d_ == "pending"]
@@ -846,26 +892,47 @@ def apply(c: Client, use_cache: bool, dry_run: bool) -> int:
               "edit data/seed/sec_ciks.tsv, re-run.")
         return 1
 
-    with get_engine().begin() as conn:
-        if conn.execute(text(
-                "SELECT to_regclass('public.cost_claims') IS NULL")
-        ).scalar_one():
-            print("cost_claims does not exist — apply 021 first.")
+    # `known` stays None when the database could not be read at all, so
+    # a 'match' row is reported as UNVERIFIED rather than silently
+    # passing an empty-set test it would also have passed if wrong.
+    known = None
+    try:
+        with get_engine().begin() as conn:
+            if conn.execute(text(
+                    "SELECT to_regclass('public.cost_claims') IS NULL")
+            ).scalar_one():
+                print("cost_claims does not exist — apply 021 first.")
+                return 1
+            known = {r[0] for r in conn.execute(text(
+                "SELECT code FROM organizations"))}
+    except (SQLAlchemyError, OSError) as exc:
+        _report_db_unreachable(exc, dry_run)
+        if not dry_run:
+            print("\n  REFUSING TO WRITE: a write needs the database the "
+                  "preconditions are in.")
             return 1
-        known = {r[0] for r in conn.execute(text(
-            "SELECT code FROM organizations"))}
 
     live = [(t, o, d_) for t, o, d_, _b in seed if d_ in ("match", "claim")]
-    bad = [(t, o) for t, o, d_ in live
-           if d_ == "match" and (not o or o == "-" or o not in known)]
-    if bad:
-        print("REFUSING TO WRITE.\n")
-        print(f"These rows say 'match' but name no code in organizations: "
-              f"{bad}")
-        print("Use 'claim' if the filer is real and organizations has no "
-              "row for it —\nAD-085 allows a claim with no link, and that "
-              "is different from a typo.")
-        return 1
+    claims_match = [(t, o) for t, o, d_ in live if d_ == "match"]
+    if known is None:
+        if claims_match:
+            print(f"\n  UNVERIFIED: {len(claims_match)} row(s) say 'match' "
+                  f"and name a code this run\n  could not check against "
+                  f"`organizations`: {[t for t, _o in claims_match]}")
+        else:
+            print("\n  No row says 'match', so nothing needed "
+                  "`organizations` anyway.")
+    else:
+        bad = [(t, o) for t, o in claims_match
+               if not o or o == "-" or o not in known]
+        if bad:
+            print("REFUSING TO WRITE.\n")
+            print(f"These rows say 'match' but name no code in "
+                  f"organizations: {bad}")
+            print("Use 'claim' if the filer is real and organizations has "
+                  "no row for it —\nAD-085 allows a claim with no link, "
+                  "and that is different from a typo.")
+            return 1
 
     ciks = resolve_tickers(c, [t for t, _o, _d_ in live], use_cache)
     inserted = updated = 0
@@ -882,7 +949,10 @@ def apply(c: Client, use_cache: bool, dry_run: bool) -> int:
     #: dates do not describe a year. L3Harris's FY2025 revenue is one.
     near: list = []
 
-    with get_engine().begin() as conn:
+    # A dry run executes nothing, so it opens no connection -- which is
+    # also what lets it rehearse the EDGAR side with the database down.
+    with (contextlib.nullcontext(None) if dry_run
+          else get_engine().begin()) as conn:
         for tk, org_code, decision in live:
             cik = ciks.get(tk)
             if not cik:

@@ -194,6 +194,39 @@ def _concept(tag: str, years, name: str = "A FILER INC") -> dict:
         for y in years]}}
 
 
+def test_a_connection_error_never_carries_a_credential() -> None:
+    """A connection failure is the one place a connection string can
+    turn up in a message, and nothing in this project prints a
+    credential. The URL is replaced WHOLESALE rather than masked in
+    part, because a half-masked secret is still a secret someone has to
+    reason about. The driver's own words have to survive, though: the
+    whole point of showing the message is that "server didn't return
+    client encoding" and "password authentication failed" mean
+    different things, and check_db_endpoints.py tells them apart."""
+    from src.funding.sec_edgar import _db_message
+
+    class Fake(Exception):
+        pass
+
+    plain = Fake("server didn't return client encoding")
+    assert _db_message(plain) == "server didn't return client encoding"
+
+    leaky = Fake('could not connect to\n  postgresql://postgres.abc:'
+                 'sup3r-s3cret@aws-0-us-east-1.pooler.supabase.com:6543/'
+                 'postgres (timeout)')
+    out = _db_message(leaky)
+    for secret in ("sup3r-s3cret", "postgres.abc", "pooler.supabase.com",
+                   "postgresql://"):
+        assert secret not in out, f"{secret} survived: {out}"
+    assert "<connection string redacted>" in out
+    assert "\n" not in out, "one line, so it prints as one"
+
+    wrapped = Fake("wrapper")
+    wrapped.orig = plain
+    assert _db_message(wrapped) == "server didn't return client encoding", (
+        "the DBAPI message under SQLAlchemy's wrapper is the useful half")
+
+
 def test_a_full_year_mislabelled_as_a_quarter_is_refused_and_reported():
     """L3Harris's FY2025 10-K, exactly as EDGAR serves it: revenue of
     $21,865,000,000 with start=2025-10-04, end=2026-01-02 -- fp="FY",
