@@ -15,6 +15,8 @@ Offline. No request is made; only the request the client would make.
 """
 from __future__ import annotations
 
+import pathlib
+
 import importlib
 
 import pytest
@@ -152,7 +154,8 @@ def test_every_sec_seed_row_states_a_basis() -> None:
     for line in rows:
         parts = line.split("\t")
         assert len(parts) >= 4, f"no basis column: {line[:60]}"
-        assert parts[2] in ("pending", "match", "claim", "refuse"), parts[2]
+        from src.funding.sec_edgar import DECISIONS
+        assert parts[2] in DECISIONS, parts[2]
         assert len(parts[3].strip()) > 40, (
             f"basis too thin to review: {parts[0]} -> {parts[3][:40]!r}")
 
@@ -212,3 +215,26 @@ def test_space_sic_codes_exist_in_the_secs_own_list() -> None:
     assert all(isinstance(v, str) and v for v in SPACE_SIC.values()), (
         "every code carries the SEC's own office description, so a "
         "reviewer can check it against the list without a lookup")
+
+
+def test_consume_rows_are_recorded_but_never_ingested_as_claims():
+    """`consume` was added 2026-10-19 and is not a softer refusal — it
+    is a different axis. The other decisions answer "is this part of
+    the space industry"; consume answers "does this business rest on
+    something in orbit", which is the demand side.
+
+    The hard part is what it must NOT do. Lockheed's revenue is money
+    the space industry earned. Garmin's is money consumers paid for
+    handheld GPS units, of which some unknown fraction reflects the
+    value of a space service. Writing the second into cost_claims as
+    though it were the first is a real number meaning something other
+    than its column says — so --apply ingests match and claim only."""
+    from src.funding import sec_edgar as se
+    assert "consume" in se.DECISIONS
+    assert "consume" not in se.INGESTABLE
+    assert set(se.INGESTABLE) == {"match", "claim"}
+    src = pathlib.Path(se.__file__).read_text(encoding="utf-8")
+    # Every gate that decides whether to fetch financial facts must use
+    # INGESTABLE, not a hand-listed comparison that a fifth decision
+    # would quietly fall through (AD-109).
+    assert src.count("decision not in INGESTABLE") >= 2

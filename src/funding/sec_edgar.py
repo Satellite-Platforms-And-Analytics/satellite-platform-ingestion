@@ -152,6 +152,45 @@ from src.db.writer import get_engine                         # noqa: E402
 from src.useragent import user_agent                         # noqa: E402
 
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+#: What a seed row's `decision` column may say.
+#:
+#:   pending  undecided. --apply refuses the file while any row says this
+#:   match    in scope AND mapped to an existing `organizations` row
+#:   claim    in scope; needs an organizations row or a match
+#:   refuse   out of scope, reason in the basis
+#:   consume  ITS BUSINESS DEPENDS ON A SPACE SERVICE IT DOES NOT SUPPLY
+#:
+#: `consume` was added 2026-10-19 at the user's request, and it is not a
+#: softer refusal - it is a different axis. The other four answer "is
+#: this part of the space industry". `consume` answers "does this
+#: company's business rest on something in orbit", which is the DEMAND
+#: side: Garmin needs GNSS it does not own, T-Mobile resells Starlink
+#: capacity, Qualcomm ships modems that talk to satellites. Counting
+#: those, and eventually their spend, is how the platform can say
+#: something about demand in a segment rather than only about supply.
+#:
+#: WHAT `consume` MUST NOT DO: a consume row's revenue is NOT space
+#: revenue. Lockheed's revenue is money the space industry earned;
+#: Garmin's is money consumers paid for handheld GPS units, of which
+#: some unknown fraction reflects the value of a space service. Writing
+#: the second into cost_claims as though it were the first would be the
+#: worst kind of category error - a real number meaning something other
+#: than its column says. So --apply ingests `match` and `claim` only,
+#: and `consume` rows are recorded and skipped until there is a model
+#: that can state what their money measures.
+#:
+#: AND A LIMIT WORTH KNOWING: this category can never be populated by
+#: an SIC scan. Consumers of space services are classified under THEIR
+#: OWN industry - an airline under air transport, a farm-equipment maker
+#: under machinery, an insurer under insurance - so the nine in-scope
+#: codes will only ever catch the handful of consumers that happen to
+#: sit in communications or navigation. The three found here are a
+#: start, not a population.
+DECISIONS = ("pending", "match", "claim", "refuse", "consume")
+
+#: Decisions `--apply` will actually ingest financial facts for.
+INGESTABLE = ("match", "claim")
+
 SUBMISSIONS = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 CONCEPT = ("https://data.sec.gov/api/xbrl/companyconcept/"
            "CIK{cik:010d}/us-gaap/{tag}.json")
@@ -290,8 +329,10 @@ def read_seed() -> list:
             raise SystemExit(f"seed row has no basis column: {line[:60]}")
         tk, code, decision, basis = (parts[0].strip(), parts[1].strip(),
                                      parts[2].strip(), parts[3].strip())
-        if decision not in ("pending", "match", "claim", "refuse"):
-            raise SystemExit(f"seed row {tk}: bad decision {decision!r}")
+        if decision not in DECISIONS:
+            raise SystemExit(
+                f"seed row {tk}: bad decision {decision!r}. "
+                f"One of {', '.join(sorted(DECISIONS))}.")
         if len(basis) <= 40:
             raise SystemExit(
                 f"seed row {tk}: basis too thin to review ({basis!r}). "
@@ -402,6 +443,10 @@ def survey(c: Client, use_cache: bool, limit: int) -> int:
         sic = str(sub.get("sic") or "")
         flag = ("" if sic in SPACE_SIC
                 else "   <-- SIC not in the in-scope list")
+        if decision == "consume":
+            # Surveyed on purpose: what SIC the SEC gives a demand-side
+            # filer is exactly the thing the consume category is for.
+            flag += "   [consume: demand side, not ingested]"
         print(f"  {tk:<8}{cik:<12}{sic:<7}{str(sub.get('name'))[:40]}{flag}")
         if shown < limit:
             facts_for[tk] = (cik, sub.get("name"))
@@ -432,8 +477,8 @@ def survey(c: Client, use_cache: bool, limit: int) -> int:
 
     print(f"\n  {'ticker':<8}{'metric':<10}{'our tag?':<10}reports instead")
     for tk, _code, decision, _b in seed:
-        if decision == "refuse" or not ciks.get(tk):
-            continue
+        if decision not in INGESTABLE or not ciks.get(tk):
+            continue        # consume rows are never written as claims
         for metric, tag in TAG_FOR_METRIC.items():
             got = reports.get(tk, set())
             ours = "yes" if tag in got else "NO"
@@ -452,8 +497,8 @@ def survey(c: Client, use_cache: bool, limit: int) -> int:
     shown = 0
     for tk, _code, decision, _b in seed:
         cik = ciks.get(tk)
-        if not cik or decision == "refuse" or shown >= limit:
-            continue
+        if not cik or decision not in INGESTABLE or shown >= limit:
+            continue        # consume rows are never written as claims
         shown += 1
         print(f"\n    {tk} — CIK {cik:010d}")
         for metric, tag in TAG_FOR_METRIC.items():

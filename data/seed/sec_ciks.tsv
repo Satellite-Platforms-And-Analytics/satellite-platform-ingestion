@@ -32,6 +32,25 @@
 # name and SIC beside it. Tickers are easier to be right about than
 # CIKs, which is the whole reason this column is tickers.
 #
+#
+# DECISION `consume`, added 2026-10-19.
+# Not a softer refusal - a different axis. The other four answer "is
+# this part of the space industry". `consume` answers "does this
+# business rest on something in orbit", which is the DEMAND side:
+# Garmin needs GNSS it does not own, T-Mobile resells Starlink
+# capacity, Qualcomm ships modems that talk to satellites.
+#
+# A consume row's revenue is NOT space revenue, and --apply therefore
+# ingests `match` and `claim` only. Lockheed's revenue is money the
+# space industry earned; Garmin's is money consumers paid for handheld
+# receivers, of which some unknown fraction reflects the value of a
+# space service. The two are not the same number and must not share a
+# column.
+#
+# This category cannot be populated by an SIC scan: consumers are
+# classified under THEIR OWN industry, so the nine in-scope codes only
+# ever catch the few that sit in communications or navigation.
+#
 ticker	org_code	decision	basis
 LMT	-	pending	Lockheed Martin. SIC expected 3760/3761. organizations has LM; confirm against the survey before matching.
 NOC	-	pending	Northrop Grumman. GCAT models the business units and may have no parent row - 10-12 found exactly that. Expect `claim` rather than `match`.
