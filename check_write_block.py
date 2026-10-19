@@ -57,7 +57,12 @@ from src.db.writer import brief_db_error, get_engine         # noqa: E402
 
 SETTINGS = ("statement_timeout", "lock_timeout",
             "idle_in_transaction_session_timeout",
-            "default_transaction_read_only")
+            "default_transaction_read_only", "transaction_read_only")
+
+#: Every section runs under its OWN generous timeout, so a short global
+#: statement_timeout cannot kill the tool that exists to report it.
+SECTION_TIMEOUT = "15s"
+SECTION_LOCK_TIMEOUT = "5s"
 
 
 def endpoint() -> "int | None":
@@ -78,16 +83,174 @@ def endpoint() -> "int | None":
     return u.port
 
 
+def section(conn, title: str, fn) -> None:
+    """Run one question, timed, under its own timeout, and never let it
+    take the rest of the diagnosis with it.
+
+    ORDERING AND ISOLATION ARE THE WHOLE DESIGN HERE, and the first
+    version of this file had neither. It put the table reads BEFORE the
+    settings and the locks, in one unguarded block, so when
+    `SELECT count(*)` on a 25-row table timed out the run died with
+    every cheap question still unasked -- the timeouts, the blocking
+    pids, the locks. A diagnostic has to be ordered by what survives
+    failure, not by what reads well, and each question has to fail
+    alone.
+    """
+    print(f"\n  {title}")
+    t0 = time.monotonic()
+    try:
+        conn.rollback()
+        conn.execute(text(f"SET LOCAL statement_timeout = "
+                          f"'{SECTION_TIMEOUT}'"))
+        conn.execute(text(f"SET LOCAL lock_timeout = "
+                          f"'{SECTION_LOCK_TIMEOUT}'"))
+        fn(conn)
+        print(f"    [{(time.monotonic() - t0) * 1000:.0f} ms]")
+    except Exception as exc:                                 # noqa: BLE001
+        print(f"    FAILED after {(time.monotonic() - t0) * 1000:.0f} ms: "
+              f"{brief_db_error(exc)}")
+    finally:
+        try:
+            conn.rollback()
+        except Exception:                                    # noqa: BLE001
+            pass
+
+
+def _latency(conn) -> None:
+    for i in range(3):
+        t0 = time.monotonic()
+        conn.execute(text("SELECT 1"))
+        ms = (time.monotonic() - t0) * 1000
+        print(f"    SELECT 1 #{i + 1}: {ms:.0f} ms")
+    print("    If these are slow or uneven, the link is the problem and "
+          "nothing below\n    is about cost_claims at all.")
+
+
+def _settings(conn) -> None:
+    for s in SETTINGS:
+        try:
+            v = conn.execute(text(f"SHOW {s}")).scalar_one()
+        except Exception as exc:                             # noqa: BLE001
+            v = f"unreadable: {brief_db_error(exc)[:40]}"
+        print(f"    {s:<40}{v}")
+    print("    A `statement_timeout` of a few seconds is the simplest "
+          "explanation for a\n    one-row insert being cancelled. This "
+          "is the line that settles it.")
+
+
+def _role_settings(conn) -> None:
+    rows = list(conn.execute(text("""
+        SELECT coalesce(r.rolname, 'ALL ROLES') AS who,
+               coalesce(d.datname, 'ALL DATABASES') AS db, s.setconfig
+          FROM pg_db_role_setting s
+          LEFT JOIN pg_roles r ON r.oid = s.setrole
+          LEFT JOIN pg_database d ON d.oid = s.setdatabase
+         ORDER BY who""")))
+    if not rows:
+        print("    none set per role or per database.")
+    for who, db, cfg in rows:
+        keep = [c for c in (cfg or [])
+                if "timeout" in c or "read_only" in c]
+        if keep:
+            print(f"    {who:<22}{db:<14}{keep}")
+
+
+def _activity(conn) -> None:
+    rows = list(conn.execute(text("""
+        SELECT pid, state, wait_event_type, wait_event,
+               round(extract(epoch FROM now() - xact_start)) AS xact_age_s,
+               round(extract(epoch FROM now() - backend_start)) AS conn_age_s,
+               pg_blocking_pids(pid) AS blockers,
+               left(coalesce(query, ''), 44) AS q
+          FROM pg_stat_activity
+         WHERE datname = current_database() AND pid <> pg_backend_pid()
+         ORDER BY xact_start NULLS LAST""")))
+    if not rows:
+        print("    none. Nothing else is connected to this database.")
+    for pid, st, wt, we, xage, cage, blockers, q in rows:
+        flag = "   <-- HOLDS ITS LOCKS" if st == "idle in transaction" else ""
+        print(f"    pid {pid:<8}{str(st):<22}xact {str(xage):>6}s  "
+              f"conn {str(cage):>6}s  {str(wt or '-')}/{str(we or '-')}{flag}")
+        if blockers:
+            print(f"        BLOCKED BY {list(blockers)}")
+        if q.strip():
+            print(f"        {q.strip()}")
+
+
+def _locks(conn) -> None:
+    rows = list(conn.execute(text("""
+        SELECT l.pid, coalesce(c.relname, '-') AS rel, l.mode, l.granted
+          FROM pg_locks l
+          LEFT JOIN pg_class c ON c.oid = l.relation
+         WHERE l.pid <> pg_backend_pid() AND l.locktype = 'relation'
+         ORDER BY l.granted, rel""")))
+    if not rows:
+        print("    no relation locks held by any other backend.")
+    for pid, rel, mode, granted in rows:
+        mark = "granted" if granted else "WAITING"
+        flag = ("   <-- blocks even a SELECT"
+                if "AccessExclusive" in str(mode) else "")
+        print(f"    pid {pid:<8}{str(rel)[:28]:<30}{str(mode):<26}"
+              f"{mark}{flag}")
+
+
+def _shape(conn) -> None:
+    trg = list(conn.execute(text("""
+        SELECT tgname FROM pg_trigger
+         WHERE tgrelid = 'public.cost_claims'::regclass
+           AND NOT tgisinternal""")))
+    print(f"    triggers: {[t[0] for t in trg] or 'none'}")
+    con = list(conn.execute(text("""
+        SELECT conname, contype FROM pg_constraint
+         WHERE conrelid = 'public.cost_claims'::regclass
+         ORDER BY contype, conname""")))
+    print(f"    constraints: {len(con)} "
+          f"({', '.join(f'{t}:{n}' for n, t in con[:6])}"
+          f"{' ...' if len(con) > 6 else ''})")
+    rel = conn.execute(text("""
+        SELECT pg_size_pretty(pg_total_relation_size(
+                   'public.cost_claims'::regclass)),
+               (SELECT reltuples::bigint FROM pg_class
+                 WHERE oid = 'public.cost_claims'::regclass)""")).one()
+    print(f"    size on disk: {rel[0]}   planner's row estimate: {rel[1]}")
+
+
+def _contents(conn) -> None:
+    for src, n, lo, hi in conn.execute(text("""
+            SELECT source, count(*), min(as_of_date), max(as_of_date)
+              FROM cost_claims GROUP BY source ORDER BY source""")):
+        print(f"    {str(src):<16}{n:>7} rows   {lo} .. {hi}")
+    total = conn.execute(text(
+        "SELECT count(*) FROM cost_claims")).scalar_one()
+    print(f"    {'TOTAL':<16}{total:>7} rows")
+    print("    Measured, so 'nothing was written' is a measurement.")
+
+
+def _probe_insert(conn) -> None:
+    conn.execute(text("""
+        INSERT INTO cost_claims (
+            subject_kind, subject_id, subject_label, metric, value,
+            currency, as_of_date, published_date, method, source,
+            source_url)
+        VALUES ('enterprise', 'CIK0000000000',
+                'check_write_block probe', 'revenue', 1, 'USD',
+                DATE '1900-01-01', DATE '1900-01-01', 'published',
+                'sec_edgar', 'https://example.invalid/probe')
+        ON CONFLICT (subject_kind, subject_id, metric, source, as_of_date)
+        DO NOTHING"""))
+    print("    the insert itself completed. Rolling back.")
+
+
 def main() -> int:
     print("\n  ENDPOINT")
     port = endpoint()
 
-    # THIS SCRIPT COMMITTED THE FAILURE IT WAS WRITTEN TO REPORT.
-    # The first version went straight into get_engine().connect() and
-    # produced a 60-line traceback -- the exact thing AD-123 had just
-    # been written about, one file later (AD-105's shape: the tool that
-    # does what it was built to catch). A diagnostic that cannot
-    # diagnose its own connection is not a diagnostic.
+    # THIS SCRIPT COMMITTED THE FAILURE IT WAS WRITTEN TO REPORT, TWICE.
+    # First it went straight into get_engine().connect() with no wrap and
+    # produced a 60-line traceback -- AD-123's lesson, one file later.
+    # Then, wrapped, it asked its questions in the wrong ORDER and in one
+    # unguarded block, so a timeout on `SELECT count(*)` over 25 rows
+    # killed the run with every cheap question unasked. Hence section().
     try:
         conn_ctx = get_engine().connect()
     except Exception as exc:                                 # noqa: BLE001
@@ -107,147 +270,20 @@ def main() -> int:
         return 1
 
     with conn_ctx as conn:
-        print("\n  WHAT IS IN cost_claims NOW (so 'nothing was written' is "
-              "measured, not assumed)")
         if conn.execute(text(
                 "SELECT to_regclass('public.cost_claims') IS NULL")
         ).scalar_one():
-            print("    cost_claims does not exist. Apply 021 first.")
+            print("\n  cost_claims does not exist. Apply 021 first.")
             return 1
-        for src, n, lo, hi in conn.execute(text("""
-                SELECT source, count(*), min(as_of_date), max(as_of_date)
-                  FROM cost_claims GROUP BY source ORDER BY source""")):
-            print(f"    {str(src):<16}{n:>7} rows   {lo} .. {hi}")
-        total = conn.execute(text(
-            "SELECT count(*) FROM cost_claims")).scalar_one()
-        print(f"    {'TOTAL':<16}{total:>7} rows")
-
-        print("\n  TIMEOUTS THIS SESSION HAS")
-        for s in SETTINGS:
-            try:
-                v = conn.execute(text(f"SHOW {s}")).scalar_one()
-            except Exception as exc:                         # noqa: BLE001
-                v = f"unreadable: {str(exc).splitlines()[0][:40]}"
-            print(f"    {s:<40}{v}")
-
-        print("\n  TIMEOUTS ATTACHED TO ROLES (pg_db_role_setting)")
-        try:
-            rows = list(conn.execute(text("""
-                SELECT coalesce(r.rolname, 'ALL ROLES') AS who,
-                       coalesce(d.datname, 'ALL DATABASES') AS db,
-                       s.setconfig
-                  FROM pg_db_role_setting s
-                  LEFT JOIN pg_roles r ON r.oid = s.setrole
-                  LEFT JOIN pg_database d ON d.oid = s.setdatabase
-                 ORDER BY who""")))
-            if not rows:
-                print("    none set per role or per database.")
-            for who, db, cfg in rows:
-                keep = [c for c in (cfg or [])
-                        if "timeout" in c or "read_only" in c]
-                if keep:
-                    print(f"    {who:<22}{db:<12}{keep}")
-        except Exception as exc:                             # noqa: BLE001
-            print(f"    unreadable: {str(exc).splitlines()[0][:60]}")
-
-        print("\n  OTHER BACKENDS (anything idle in a transaction holds its "
-              "locks)")
-        try:
-            rows = list(conn.execute(text("""
-                SELECT pid, state, wait_event_type, wait_event,
-                       round(extract(epoch FROM now() - xact_start))
-                           AS xact_age_s,
-                       left(coalesce(query, ''), 48) AS q
-                  FROM pg_stat_activity
-                 WHERE datname = current_database()
-                   AND pid <> pg_backend_pid()
-                 ORDER BY xact_start NULLS LAST""")))
-            if not rows:
-                print("    none. Nothing else is connected to this "
-                      "database.")
-            for pid, state, wt, we, age, q in rows:
-                flag = ("   <-- HOLDING LOCKS"
-                        if state == "idle in transaction" else "")
-                print(f"    pid {pid:<8}{str(state):<22}"
-                      f"xact {str(age):>6}s  {str(wt or '-')}/"
-                      f"{str(we or '-')}{flag}")
-                if q.strip():
-                    print(f"        {q.strip()}")
-        except Exception as exc:                             # noqa: BLE001
-            print(f"    unreadable: {str(exc).splitlines()[0][:60]}")
-
-        print("\n  LOCKS ON cost_claims RIGHT NOW")
-        try:
-            rows = list(conn.execute(text("""
-                SELECT l.pid, l.mode, l.granted
-                  FROM pg_locks l
-                 WHERE l.relation = 'public.cost_claims'::regclass
-                   AND l.pid <> pg_backend_pid()""")))
-            if not rows:
-                print("    none.")
-            for pid, mode, granted in rows:
-                print(f"    pid {pid:<8}{mode:<28}"
-                      f"{'granted' if granted else 'WAITING'}")
-        except Exception as exc:                             # noqa: BLE001
-            print(f"    unreadable: {str(exc).splitlines()[0][:60]}")
-
-        print("\n  TRIGGERS AND CONSTRAINTS ON cost_claims")
-        try:
-            trg = list(conn.execute(text("""
-                SELECT tgname FROM pg_trigger
-                 WHERE tgrelid = 'public.cost_claims'::regclass
-                   AND NOT tgisinternal""")))
-            print(f"    triggers: {[t[0] for t in trg] or 'none'}")
-            con = list(conn.execute(text("""
-                SELECT conname, contype FROM pg_constraint
-                 WHERE conrelid = 'public.cost_claims'::regclass
-                 ORDER BY contype, conname""")))
-            print(f"    constraints: {len(con)} "
-                  f"({', '.join(f'{t}:{n}' for n, t in con[:8])}"
-                  f"{' ...' if len(con) > 8 else ''})")
-        except Exception as exc:                             # noqa: BLE001
-            print(f"    unreadable: {str(exc).splitlines()[0][:60]}")
-
-        print("\n  ONE REAL INSERT, 20s local timeout, ROLLED BACK")
-        print("    This is the measurement that separates the three "
-              "causes.")
-        conn.rollback()
-        t0 = time.monotonic()
-        try:
-            conn.execute(text("SET LOCAL statement_timeout = '20s'"))
-            conn.execute(text("SET LOCAL lock_timeout = '5s'"))
-            conn.execute(text("""
-                INSERT INTO cost_claims (
-                    subject_kind, subject_id, subject_label, metric,
-                    value, currency, as_of_date, published_date, method,
-                    source, source_url)
-                VALUES ('enterprise', 'CIK0000000000',
-                        'check_write_block probe', 'revenue', 1, 'USD',
-                        DATE '1900-01-01', DATE '1900-01-01',
-                        'published', 'sec_edgar',
-                        'https://example.invalid/probe')
-                ON CONFLICT (subject_kind, subject_id, metric, source,
-                             as_of_date) DO NOTHING"""))
-            dt = time.monotonic() - t0
-            print(f"    OK in {dt * 1000:.0f} ms")
-            if dt < 1:
-                print("    So the insert itself is fast. The earlier "
-                      "failure was the TIMEOUT\n    this session runs "
-                      "under, not the work -- see the settings above.")
-            else:
-                print("    Slow on its own. Read the triggers and "
-                      "constraints above.")
-        except Exception as exc:                             # noqa: BLE001
-            dt = time.monotonic() - t0
-            first = str(exc).splitlines()[0][:100]
-            print(f"    FAILED after {dt * 1000:.0f} ms: {first}")
-            if "lock" in first.lower():
-                print("    A LOCK. The blocking pid is in the backend "
-                      "list above; it has to end\n    before any write "
-                      "can land.")
-        finally:
-            conn.rollback()
-            print("    rolled back.")
+        # Cheapest and most decisive first, table reads last.
+        section(conn, "ROUND-TRIP LATENCY", _latency)
+        section(conn, "TIMEOUTS THIS SESSION RUNS UNDER", _settings)
+        section(conn, "TIMEOUTS ATTACHED TO ROLES", _role_settings)
+        section(conn, "OTHER BACKENDS, AND WHO BLOCKS WHOM", _activity)
+        section(conn, "RELATION LOCKS HELD BY ANYONE ELSE", _locks)
+        section(conn, "SHAPE OF cost_claims", _shape)
+        section(conn, "WHAT cost_claims HOLDS NOW", _contents)
+        section(conn, "ONE REAL INSERT, ROLLED BACK", _probe_insert)
 
     print("\n  Nothing was changed.")
     return 0
