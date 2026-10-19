@@ -154,6 +154,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 from collections import Counter
@@ -299,6 +300,29 @@ NOT_FILED = {
 from src.sic import SPACE_SIC                                 # noqa: E402
 
 
+def _brief_body(raw: bytes) -> str:
+    """What to keep from an HTTP error body: the server's own reason.
+
+    Both directions of this were wrong inside one day. `str(exc)[:50]`
+    cut a 404 off at `.../api/xbrl/compan` -- the problem named and the
+    URL needed to reproduce it gone. Printing the body whole then put
+    300 characters of S3 XML into the middle of the trail it was printed
+    into, carrying a `RequestId` and `HostId` nobody will ever look up
+    and a `Key` already present in the URL beside it.
+
+    So: `<Code>` and `<Message>` when the body is one of EDGAR's S3
+    errors, otherwise the body collapsed onto one line and capped. One
+    line, because the caller prints it as one.
+    """
+    body = raw.decode("utf-8", "replace")
+    found = [m.group(1).strip() for m in (
+        re.search(r"<Code>([^<]{0,80})</Code>", body),
+        re.search(r"<Message>([^<]{0,200})</Message>", body)) if m]
+    if found:
+        return ": ".join(found)
+    return " ".join(body.split())[:200]
+
+
 class Client:
     def __init__(self, max_requests: int = DEFAULT_MAX_REQUESTS):
         contact = (os.environ.get("CONTACT_EMAIL") or "").strip()
@@ -346,9 +370,10 @@ class Client:
                     raw = gzip.decompress(raw)
                 return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as e:
+            why = _brief_body(e.read())
             raise RuntimeError(
-                f"HTTP {e.code} from {url}\n"
-                f"{e.read().decode('utf-8', 'replace')[:300]}") from None
+                f"HTTP {e.code} from {url}"
+                + (f" -- {why}" if why else "")) from None
 
 
 def cached(c: Client, url: str, key: str, use_cache: bool = True):
@@ -600,7 +625,19 @@ def survey(c: Client, use_cache: bool, limit: int) -> int:
                 fr, _h = cached(c, FRAMES.format(tag=t, year=year),
                                 f"frame_{t}_{year}", use_cache)
             except RuntimeError as exc:
-                print(f"    {t}: frame unavailable -- {exc}")
+                if "HTTP 404" in str(exc):
+                    # A frame exists per tag PER YEAR. A concept nobody
+                    # reported in CY<year> has no frame for it, and that
+                    # is an absence, not a fault -- SalesRevenueNet is a
+                    # pre-2018 tag and 404s here every run. Saying
+                    # "unavailable" would invite the reading that the
+                    # tag is broken, which is AD-113's shape.
+                    print(f"    {t:<62}no CY{year} frame: nobody reported "
+                          f"this concept that year.")
+                    print(f"      Says nothing about the historical "
+                          f"series; companyconcept decides that.")
+                else:
+                    print(f"    {t}: frame unavailable -- {exc}")
                 continue
             here = {int(d["cik"]) for d in fr.get("data", [])}
             for cik in here & set(cik_to_tk):

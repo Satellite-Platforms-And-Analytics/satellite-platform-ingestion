@@ -194,6 +194,31 @@ def _concept(tag: str, years, name: str = "A FILER INC") -> dict:
         for y in years]}}
 
 
+def test_an_http_error_keeps_the_url_and_drops_the_boilerplate() -> None:
+    """Both directions of this were wrong inside one day. str(exc)[:50]
+    cut a 404 off at `.../api/xbrl/compan`: the problem named and the
+    URL needed to reproduce it gone. Printing the body whole then put
+    300 characters of S3 XML into the middle of the trail it was printed
+    into -- a RequestId and HostId nobody will look up, and a Key
+    already in the URL beside it. Keep the server's own reason, on one
+    line, next to the URL that produced it."""
+    from src.funding.sec_edgar import _brief_body
+    body = (b'<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>'
+            b'NoSuchKey</Code><Message>The specified key does not exist.'
+            b'</Message><Key>api/xbrl/frames/us-gaap/SalesRevenueNet/USD/'
+            b'CY2025.json</Key><RequestId>6A0W88VM6E67KS20</RequestId>'
+            b'<HostId>0WILON9nToutgJX60niRINM1CKY</HostId></Error>')
+    brief = _brief_body(body)
+    assert brief == "NoSuchKey: The specified key does not exist."
+    assert "\n" not in brief, "a trail line has to stay one line"
+    for noise in ("RequestId", "HostId", "<?xml", "<Code>"):
+        assert noise not in brief, f"{noise} survived"
+    assert len(_brief_body(b"x" * 5000)) <= 200, "an unbounded body"
+    assert _brief_body(b"") == "", (
+        "an empty body must read as empty, so the caller can omit the "
+        "separator rather than print a dash with nothing after it")
+
+
 def test_tag_chain_is_ordered_and_never_a_merge() -> None:
     """The one-tag-per-metric rule was replaced by an ordered chain on
     2026-10-19, because the first live --survey showed Lockheed's and
