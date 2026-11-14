@@ -139,6 +139,16 @@ DB_HINTS = (
      "as EAUTHQUERY\n    without naming itself: check whether the "
      "project is paused, and whether the\n    pooler host in the "
      "dashboard still matches .env."),
+    (("canceling statement due to statement timeout",),
+     "The CONNECTION SUCCEEDED and the statement did not. So this is "
+     "not about\n    reachability at all -- the database is up and not "
+     "serving. Measured on both\n    2026-10-19 and 2026-11-13: "
+     "catalog reads return in under 2s while a count\n    over 25 rows "
+     "is cancelled, with no lock anywhere to explain it. That is what "
+     "a\n    restoring or starved instance looks like from a client. "
+     "If a project was just\n    resumed, wait and retry; if it has "
+     "been like this for days, the instance is the\n    problem and "
+     "the dashboard is where it is visible."),
     (("timeout expired",),
      "The endpoint did not accept a connection at all. A pooler that "
      "answered minutes\n    ago and times out now is flapping, which "

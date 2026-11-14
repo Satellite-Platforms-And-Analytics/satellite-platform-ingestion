@@ -215,6 +215,15 @@ def test_known_driver_messages_get_a_hint_and_unknown_ones_do_not():
 
     assert db_hint("server didn't return client encoding")
     assert db_hint("port 6543 failed: timeout expired")
+
+    # A STATEMENT timeout is not a CONNECT failure, and conflating them
+    # sends the reader to the wrong tool. 2026-11-13: --frames got this
+    # 22 seconds after --apply could not connect at all, which is the
+    # measurement that says the instance is flapping rather than simply
+    # absent.
+    stmt = db_hint("canceling statement due to statement timeout")
+    assert stmt and "CONNECTION SUCCEEDED" in stmt, stmt
+    assert "reachability" in stmt
     assert db_hint("FATAL: password authentication failed for user")
     assert db_hint('could not translate host name "db.x.supabase.co"')
 
