@@ -168,7 +168,8 @@ bootstrap()
 from sqlalchemy import text                                  # noqa: E402
 from sqlalchemy.exc import SQLAlchemyError                   # noqa: E402
 
-from src.db.writer import brief_db_error, get_engine         # noqa: E402
+from src.db.writer import (brief_db_error, db_hint,          # noqa: E402
+                           get_engine)                       # noqa: E402
 from src.useragent import user_agent                         # noqa: E402
 
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -864,13 +865,17 @@ def _report_db_unreachable(exc: BaseException, dry_run: bool) -> None:
     is the AD-116 rule: an unchecked thing is reported as unchecked, not
     as ok.
     """
+    why = _db_message(exc)
     print("\n  THE DATABASE DID NOT ANSWER.")
-    print(f"    driver: {_db_message(exc)}")
-    print("    Run `python check_db_endpoints.py`. It tries the same "
-          "credential against the\n    transaction pooler (6543), the "
-          "session pooler (5432) and the direct host, and\n    its "
-          "docstring is where this project records what each driver "
-          "message means.")
+    print(f"    driver: {why}")
+    hint = db_hint(why)
+    if hint:
+        print(f"    {hint}")
+    else:
+        print("    Run `python check_db_endpoints.py`. It tries the same "
+              "credential against\n    the transaction pooler (6543), "
+              "the session pooler (5432) and the direct\n    host, and "
+              "its docstring records what each driver message means.")
     if dry_run:
         print("    --dry-run CONTINUES from here. Everything below is the "
               "EDGAR side only.\n    NOT checked: that cost_claims "
@@ -1201,6 +1206,20 @@ def main(argv=None) -> int:
         return apply(c, not args.no_cache, args.dry_run)
     except RuntimeError as exc:
         print(f"\n{exc}")
+        return 1
+    except (SQLAlchemyError, OSError) as exc:
+        # THE BACKSTOP, AND WHY IT IS HERE AND NOT AT A THIRD CALL SITE.
+        # AD-123 gave the connect path inside apply() words instead of a
+        # traceback. Then the write path needed the same fix. Then
+        # check_write_block.py needed it. Then, 2026-11-13, `--frames`
+        # produced a 60-line traceback from the one get_engine() call
+        # this module had left -- the FOURTH instance of one lesson,
+        # because each time the fix went where the failure happened to
+        # be rather than where the class of failure could be closed.
+        # Every mode of this module now funnels through here, including
+        # modes nobody has written yet.
+        _report_db_unreachable(exc, dry_run=False)
+        print("    Nothing was read and nothing was written.")
         return 1
 
 

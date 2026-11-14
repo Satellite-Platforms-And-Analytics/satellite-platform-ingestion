@@ -194,6 +194,70 @@ def _concept(tag: str, years, name: str = "A FILER INC") -> dict:
         for y in years]}}
 
 
+def test_known_driver_messages_get_a_hint_and_unknown_ones_do_not():
+    """The messages this project has actually met, mapped to the one
+    sentence each deserves -- in ONE place, because two copies of a
+    signature is AD-112 waiting to happen.
+
+    The EAUTHQUERY case is the one that matters: it is Supavisor
+    answering for a database that is not there, and it is the only
+    driver message in the set whose next step is not in this repo. An
+    unrecognised message must return None rather than a guess;
+    inventing an interpretation is AD-115 in prose."""
+    from src.db.writer import db_hint
+
+    eauth = ('connection to server at "x.pooler.supabase.com" (1.2.3.4), '
+             'port 5432 failed: FATAL: (EAUTHQUERY) authentication query '
+             'failed: connection to database not available')
+    hint = db_hint(eauth)
+    assert hint and "dashboard" in hint, hint
+    assert "pooler" in hint.lower()
+
+    assert db_hint("server didn't return client encoding")
+    assert db_hint("port 6543 failed: timeout expired")
+    assert db_hint("FATAL: password authentication failed for user")
+    assert db_hint('could not translate host name "db.x.supabase.co"')
+
+    assert db_hint("some error nobody here has seen before") is None
+    assert db_hint("") is None and db_hint(None) is None
+
+
+def test_every_mode_funnels_database_failure_through_one_backstop(
+        monkeypatch) -> None:
+    """FOUR instances of one lesson in this module. AD-123 gave the
+    connect path inside apply() sentences instead of a traceback; then
+    the write path needed the same fix; then check_write_block.py did;
+    then on 2026-11-13 `--frames` produced a 60-line traceback from the
+    one get_engine() call that had been left alone.
+
+    Each fix went where the failure happened to be rather than where
+    the class of failure could be closed. main() now catches it for
+    every mode, including modes nobody has written yet -- which is what
+    this test pins, by failing the mode that was missed."""
+    from sqlalchemy.exc import OperationalError
+    from src.funding import sec_edgar as se
+
+    class StubClient:
+        n = 0
+        ua = "stub"
+
+        def __init__(self, **_kw):
+            pass
+
+    monkeypatch.setattr(se, "Client", StubClient)
+
+    def boom(*_a, **_kw):
+        raise OperationalError("SELECT 1", {}, Exception(
+            "FATAL: (EAUTHQUERY) authentication query failed: "
+            "connection to database not available"))
+
+    for mode, argv in (("frames_mode", ["--frames", "2025"]),
+                       ("apply", ["--apply"]),
+                       ("survey", ["--survey"])):
+        monkeypatch.setattr(se, mode, boom)
+        assert se.main(argv) == 1, f"{mode} did not reach the backstop"
+
+
 def test_the_error_scrubber_has_exactly_one_definition() -> None:
     """check_write_block.py needed the same scrubber sec_edgar had, and
     copying it would be AD-112: two definitions of what counts as safe

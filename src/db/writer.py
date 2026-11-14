@@ -121,6 +121,54 @@ def brief_db_error(exc: BaseException) -> str:
     return msg[:300]
 
 
+#: Driver messages this project has met, and the one sentence each
+#: deserves. ONE definition: check_db_endpoints.py's docstring explains
+#: them at length for a reader, and this is the machine-readable half,
+#: used by src.funding.sec_edgar and check_write_block.py. Two copies of
+#: a signature is AD-112 (a recalled identifier) waiting to happen.
+DB_HINTS = (
+    (("EAUTHQUERY", "connection to database not available"),
+     "That is the POOLER answering for a database that is not there. "
+     "Supavisor is up --\n    it replied -- and its own auth query "
+     "could not reach the database behind it.\n    No code change "
+     "alters that answer: the project has to come back. On the free "
+     "tier\n    Supabase pauses a project after about a week idle, "
+     "restored by hand from the\n    dashboard."),
+    (("didn't return client encoding",),
+     "The socket opened and nothing answered as Postgres. Same family "
+     "as EAUTHQUERY\n    without naming itself: check whether the "
+     "project is paused, and whether the\n    pooler host in the "
+     "dashboard still matches .env."),
+    (("timeout expired",),
+     "The endpoint did not accept a connection at all. A pooler that "
+     "answered minutes\n    ago and times out now is flapping, which "
+     "is what a project going down looks\n    like from outside."),
+    (("password authentication failed",),
+     "The endpoint is live and the credential is wrong. This is the "
+     "one case in this\n    list that is about .env rather than the "
+     "project."),
+    (("could not translate host name",),
+     "DNS, not Postgres. Supabase retired the per-project direct "
+     "hostname for IPv4\n    clients; the pooler host is the one to "
+     "use."),
+)
+
+
+def db_hint(message: str) -> "str | None":
+    """The actionable sentence for a driver message we recognise.
+
+    Returns None rather than a guess. A message this project has not
+    met before gets no interpretation at all, which is the point --
+    inventing one is AD-115 (a threshold stolen from someone else's
+    sentence) in prose form.
+    """
+    low = str(message or "").lower()
+    for needles, hint in DB_HINTS:
+        if any(n.lower() in low for n in needles):
+            return hint
+    return None
+
+
 def get_engine() -> Engine:
     """
     Lazily create (and cache) the SQLAlchemy engine.

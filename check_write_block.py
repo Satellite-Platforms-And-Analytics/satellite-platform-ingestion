@@ -53,7 +53,8 @@ bootstrap()
 
 from sqlalchemy import text                                  # noqa: E402
 
-from src.db.writer import brief_db_error, get_engine         # noqa: E402
+from src.db.writer import (brief_db_error, db_hint,          # noqa: E402
+                           get_engine)                       # noqa: E402
 
 SETTINGS = ("statement_timeout", "lock_timeout",
             "idle_in_transaction_session_timeout",
@@ -313,16 +314,9 @@ def main() -> int:
               "could be asked.")
         why = brief_db_error(exc)
         print(f"    driver: {why}")
-        if ("EAUTHQUERY" in why
-                or "connection to database not available" in why):
-            print("    THAT IS THE POOLER ANSWERING FOR A DATABASE THAT "
-                  "IS NOT THERE.\n    Supavisor is up -- it replied -- "
-                  "and its own auth query could not reach\n    the "
-                  "database behind it. No change in this repo alters "
-                  "that answer: the\n    project has to come back. On "
-                  "the free tier Supabase pauses a project\n    after "
-                  "about a week idle, and it is restored by hand from "
-                  "the dashboard.")
+        hint = db_hint(why)
+        if hint:
+            print(f"    {hint}")
             return 1
         if port == 6543:
             print("    AND THE CONFIGURED PORT IS THE ONE THAT HAS "
