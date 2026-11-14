@@ -10,10 +10,26 @@ credentials against the transaction pooler (6543), the session pooler
 NEVER PRINTS THE PASSWORD. It prints host, port, user and the exact
 driver error, which is everything needed to tell these apart:
 
+    "(EAUTHQUERY) authentication query failed: connection to database
+     not available"
+        THE MOST ACTIONABLE ONE, and the one that needs no debugging.
+        This is Supavisor's own error, not PostgreSQL's. The pooler is
+        up -- it answered -- and it tried to run its auth query
+        (`SELECT * FROM pgbouncer.get_auth($1)`) against the database
+        behind it, and THE DATABASE WAS NOT THERE. Nothing in this
+        repo can change that answer. The project itself has to come
+        back: on the free tier Supabase pauses a project after about a
+        week idle and it is restored by hand from the dashboard.
+        Measured 2026-11-13, 26 days after the last activity.
+        A COMPONENT THAT ANSWERS IS NOT THE COMPONENT YOU NEED -- the
+        same shape as AD-113 and AD-116, where arXiv's status endpoint
+        reported GOOD while every feed it served was empty.
     "server didn't return client encoding"
         TCP connected, no PostgreSQL startup response. The peer is not
         speaking Postgres: a paused project, or a pooler that no longer
-        knows this tenant.
+        knows this tenant. In hindsight this was the same condition
+        arriving: seen on 6543 all through 2026-10-19, hours before
+        EAUTHQUERY named it outright.
     "password authentication failed"
         the endpoint is live and the credential is wrong.
     "timeout" / "could not connect"

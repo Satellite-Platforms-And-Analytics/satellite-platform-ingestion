@@ -311,7 +311,19 @@ def main() -> int:
     except Exception as exc:                                 # noqa: BLE001
         print("\n  COULD NOT CONNECT, so none of the questions below "
               "could be asked.")
-        print(f"    driver: {brief_db_error(exc)}")
+        why = brief_db_error(exc)
+        print(f"    driver: {why}")
+        if ("EAUTHQUERY" in why
+                or "connection to database not available" in why):
+            print("    THAT IS THE POOLER ANSWERING FOR A DATABASE THAT "
+                  "IS NOT THERE.\n    Supavisor is up -- it replied -- "
+                  "and its own auth query could not reach\n    the "
+                  "database behind it. No change in this repo alters "
+                  "that answer: the\n    project has to come back. On "
+                  "the free tier Supabase pauses a project\n    after "
+                  "about a week idle, and it is restored by hand from "
+                  "the dashboard.")
+            return 1
         if port == 6543:
             print("    AND THE CONFIGURED PORT IS THE ONE THAT HAS "
                   "FAILED EVERY PROBE TODAY.\n    Nothing here can be "
