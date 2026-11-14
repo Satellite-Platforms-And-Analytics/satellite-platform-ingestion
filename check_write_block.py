@@ -99,13 +99,21 @@ def section(conn, title: str, fn) -> None:
     print(f"\n  {title}")
     t0 = time.monotonic()
     try:
+        # TIMED APART FROM THE QUESTION. The first run bundled them and
+        # reported "SELECT 1: 47 ms ... [60281 ms]" in one section --
+        # three fast statements inside a minute of something, with no
+        # way to see which. A rollback and two SETs are not free through
+        # a pooler, and a measurement that includes its own setup is
+        # AD-110: a number without its denominator.
         conn.rollback()
         conn.execute(text(f"SET LOCAL statement_timeout = "
                           f"'{SECTION_TIMEOUT}'"))
         conn.execute(text(f"SET LOCAL lock_timeout = "
                           f"'{SECTION_LOCK_TIMEOUT}'"))
+        t1 = time.monotonic()
         fn(conn)
-        print(f"    [{(time.monotonic() - t0) * 1000:.0f} ms]")
+        print(f"    [setup {(t1 - t0) * 1000:.0f} ms, "
+              f"question {(time.monotonic() - t1) * 1000:.0f} ms]")
     except Exception as exc:                                 # noqa: BLE001
         print(f"    FAILED after {(time.monotonic() - t0) * 1000:.0f} ms: "
               f"{brief_db_error(exc)}")
@@ -126,16 +134,63 @@ def _latency(conn) -> None:
           "nothing below\n    is about cost_claims at all.")
 
 
-def _settings(conn) -> None:
+def inherited_settings(conn) -> dict:
+    """Read the timeouts BEFORE anything sets its own.
+
+    THE FIRST VERSION MEASURED ITS OWN GUARD. `_settings` ran inside
+    `section()`, which had already issued `SET LOCAL statement_timeout =
+    '15s'`, so the line written to answer "how short is the timeout?"
+    answered "15s" -- the value this script had just set. AD-105's
+    shape, in the one section whose whole job was that question. So this
+    runs in main(), on a fresh rollback, before any section.
+    """
+    out = {}
+    conn.rollback()
     for s in SETTINGS:
         try:
-            v = conn.execute(text(f"SHOW {s}")).scalar_one()
+            out[s] = conn.execute(text(f"SHOW {s}")).scalar_one()
         except Exception as exc:                             # noqa: BLE001
-            v = f"unreadable: {brief_db_error(exc)[:40]}"
-        print(f"    {s:<40}{v}")
-    print("    A `statement_timeout` of a few seconds is the simplest "
-          "explanation for a\n    one-row insert being cancelled. This "
-          "is the line that settles it.")
+            out[s] = f"unreadable: {brief_db_error(exc)[:40]}"
+    conn.rollback()
+    return out
+
+
+def _throughput(conn) -> None:
+    """Ten single-row inserts, then one ten-row insert. Rolled back.
+
+    --apply writes 295 rows as 295 separate statements inside one
+    transaction. Whether that is fine or hopeless is a number, not an
+    opinion, and this is the number: ms per row each way. Batching is
+    worth doing only if the gap is large, and this says how large.
+    """
+    row = ("('enterprise', 'CIK%010d', 'throughput probe', 'revenue', 1, "
+           "'USD', DATE '1900-01-01', DATE '1900-01-01', 'published', "
+           "'sec_edgar', 'https://example.invalid/probe')")
+    cols = ("subject_kind, subject_id, subject_label, metric, value, "
+            "currency, as_of_date, published_date, method, source, "
+            "source_url")
+    conflict = ("ON CONFLICT (subject_kind, subject_id, metric, source, "
+                "as_of_date) DO NOTHING")
+    t0 = time.monotonic()
+    for i in range(10):
+        conn.execute(text(f"INSERT INTO cost_claims ({cols}) VALUES "
+                          f"{row % (900000 + i)} {conflict}"))
+    one_by_one = (time.monotonic() - t0) * 1000
+    values = ", ".join(row % (910000 + i) for i in range(10))
+    t0 = time.monotonic()
+    conn.execute(text(f"INSERT INTO cost_claims ({cols}) VALUES "
+                      f"{values} {conflict}"))
+    batched = (time.monotonic() - t0) * 1000
+    print(f"    10 rows, one statement each : {one_by_one:>8.0f} ms "
+          f"({one_by_one / 10:.0f} ms/row)")
+    print(f"    10 rows, one statement      : {batched:>8.0f} ms "
+          f"({batched / 10:.0f} ms/row)")
+    if one_by_one > 0:
+        print(f"    batching is {one_by_one / max(batched, 1):.1f}x faster "
+              f"here. At 295 rows that is\n    "
+              f"{one_by_one * 29.5 / 1000:.0f}s one-by-one versus "
+              f"{batched * 29.5 / 1000:.0f}s batched.")
+    print("    Rolling back both.")
 
 
 def _role_settings(conn) -> None:
@@ -275,15 +330,26 @@ def main() -> int:
         ).scalar_one():
             print("\n  cost_claims does not exist. Apply 021 first.")
             return 1
+        # BEFORE ANY SECTION, because section() sets its own timeouts
+        # and the inherited ones are the whole question.
+        print("\n  TIMEOUTS THIS SESSION INHERITS (read before this "
+              "script sets any)")
+        for k, v in inherited_settings(conn).items():
+            print(f"    {k:<40}{v}")
+        print("    A statement_timeout of a few seconds would be the "
+              "simplest explanation\n    for a one-row insert being "
+              "cancelled. This is the line that settles it.")
+
         # Cheapest and most decisive first, table reads last.
         section(conn, "ROUND-TRIP LATENCY", _latency)
-        section(conn, "TIMEOUTS THIS SESSION RUNS UNDER", _settings)
         section(conn, "TIMEOUTS ATTACHED TO ROLES", _role_settings)
         section(conn, "OTHER BACKENDS, AND WHO BLOCKS WHOM", _activity)
         section(conn, "RELATION LOCKS HELD BY ANYONE ELSE", _locks)
         section(conn, "SHAPE OF cost_claims", _shape)
         section(conn, "WHAT cost_claims HOLDS NOW", _contents)
         section(conn, "ONE REAL INSERT, ROLLED BACK", _probe_insert)
+        section(conn, "WRITE THROUGHPUT: 10 SINGLE vs 1 BATCH, ROLLED "
+                      "BACK", _throughput)
 
     print("\n  Nothing was changed.")
     return 0
